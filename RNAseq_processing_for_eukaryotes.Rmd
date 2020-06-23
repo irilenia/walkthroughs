@@ -1,0 +1,1026 @@
+---
+title: "neurexin_analysis.Rmd"
+author: "IN"
+date: "27/04/2020"
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+# Analysis of RNA-seq data from a neurexin-deficient worm
+
+## Introduction
+The RNA-seq data in this project originates from sequencing done at the Genomics Centre of QMUL. The samples came from Prof. Filipe Cabreiro's lab (then UCL, now Imperial) from normal and neurexin-deficient worms - the work was mostly carried out by Peter Cooke (then Phd student). Other members in Filipe's lab had helped out at the time with supervision and RNA extraction. The sequencing centre did not achieve good ribosomal depletion as it transpired that they did not have the right kit for *C.elegans*. Hence, only medium/high expressed genes are seen in these data and ribosomal RNA reads must be removed before analysing the data further.
+
+Aine did a differential gene expression analysis based on counting reads using HTseq count and doing differential expresion with DESEq2 and limma. However, if I remember well, she missed out ~ half the reads  due to a problem in one of her shell scripts (when pooling together the lanes, I think she pulled only two out of the four available).
+
+It is now recognised that gene expression analysis should be based on aggregating the results of transcript-based analysis. Below is a list of links that describe how this should be done:
+
+- Differential analysis of count data (by Pachter)
+https://www.youtube.com/watch?v=ucPBBTjH5EE
+The pipeline here focuses on the kallisto/sleuth pipeline.
+- A good argument for using alignment-independent methods for transcript quantification:
+https://cgatoxford.wordpress.com/2016/08/17/why-you-should-stop-using-featurecounts-htseq-or-cufflinks2-and-start-using-kallisto-salmon-or-sailfish/
+(in there also reference to paper that uses transcript quantification and then summarises to gene level and finally also recommendations from Deseq2 developers on getting counts from kallisto/salmon and importing them to DESeq2)
+- Kallisto + sleuth documentation: https://pachterlab.github.io/kallisto/ and https://pachterlab.github.io/sleuth/
+- To assist with enrichment calculations / pathway analysis, these might be useful (was planning to explore them but ran out of time): https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6607905/ and http://bioconductor.org/packages/release/BiocViews.html#___GeneSetEnrichment
+- Two more potentially interesting papers: 
+https://link.springer.com/article/10.1007/s12035-011-8213-1 and https://www.genetics.org/content/213/4/1415.abstract
+
+### The data
+The data comprise 64 FASTQ files in total. There are 8 samples, each split into 4 lanes and each being sequenced in paired-end mode, hence there are: 8 x 4 x 2= 64 files.All data is from reversely-stranded libraries i.e. read 2 is in the same direction as the transcript on the genome.
+- 4 normal samples, names starting with "N" (biological replicates)
+- 4 neurexin-deficient samples, names starting with "SG" (biological replicates).
+
+All samples originated from 1-day old adult worms.
+
+Below is an outline of the steps to analyse the RNA-seq data from Aine's project, starting with raw fastq data and ending with mapped reads to the C. elegans transcriptome using *kallisto*.
+
+All code was run on the departmental server thoth. Where the variable $PROJECT is used below it refers to the following directory: **/d/in16/u/ubcg71a/research/filipe/** .
+
+## Data quality analysis with FastQC/multiQC
+Initial fastqc data quality analysis on raw data was carried out by both Aine and repeated by Krzysztof at some point. Results can be found here: **/d/in13/u/kszkop01/worm_neurexin/fastqc/**
+
+Had I run it myself I would have used my bash script *run_fastqc.sh* for running fastQC on multiple files:
+```{bash, eval = FALSE}
+#!/bin/bash
+# Runs FASTQC on all fastq.gz files found in given directory
+# Run as:
+# ./run_fastqc dir_of_fastq_files
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+FASTQC_DIR="/s/software/fastqc/v0.11.8/FastQC/fastqc"
+
+echo "Running FASTQC using executable: $FASTQC_DIR"
+
+for fastq_file in $1/*.fastq.gz;
+do
+  echo "Fastq file: $fastq_file"
+  $FASTQC_DIR $fastq_file -o .
+done
+
+```
+
+
+I summarised K's FASTQC results using multiQC:
+```{bash, eval = FALSE}
+module use -s /s/mm/modules
+module load python/v2
+multiqc /d/in13/u/kszkop01/worm_neurexin/fastqc/
+```
+Results are under: `$PROJECT/multiqc_on_raw/`
+
+All samples have sequences of a single length (76 bp).
+
+Diagnostic plots from FASTQC summarised with multiQC (in all these plots, files with R1 are coloured red, files with R2 are blue):
+
+![Alt text](multiqc/fastqc_per_base_sequence_quality_plot.png)
+![Alt text](multiqc/fastqc_sequence_duplication_levels_plot.png)
+![Alt text](multiqc/fastqc_per_base_n_content_plot.png)
+![Alt text](multiqc/fastqc_per_sequence_gc_content_plot.png)
+
+![Alt text](multiqc/fastqc_per_sequence_quality_scores_plot.png)
+
+![Alt text](multiqc/fastqc_overrepresented_sequencesi_plot.png)
+
+
+#### Observations from initial quality analysis
+- Quality scores are generally very high even for the last few positions of the read; in general R1 (shown in red in the plots above) slightly better than R2 (shown in blue)
+- There are high levels of duplication (most likely rRNA)
+- There are some Ns mostly at the beginning of the reads
+- GC content shows strange distribution with differences between R1 and R2 (I've seen this before in datasets; maybe bias from the bias due to adapters still present?). GC of C. elegans is supposed to have mean base composition of 36% GC (with the rRNA cistrons being closer to 51%; ref: PMID: 4858229). Our plots show higher GC content in all cases but there is a peak where rRNA should be.
+- There is evidence of adapters present in the 3' end
+
+## Read pre-processing with fastp
+I trimmed (adapters and poly(A) tails) and quality-filtered the reads using the program *fastp* :
+
+Raw fastq data is under: **$PROJECT/data/Data/170519_NS500784_0235_AHT2JYBGX2/Demulti/Data/Intensities/BaseCalls/GC-IN-6725/**
+
+To remove poly(A) tails and adapters, I ran the script under **$PROJECT/fastp**:
+```{bash, eval = FALSE}
+nohup ./run_fastp.sh ../data/Data/170519_NS500784_0235_AHT2JYBGX2/Demulti/Data/Intensities/BaseCalls/GC-IN-6725/ >& run_fastp.out &
+```
+
+Below is the run_fastp.sh script:
+```{bash, eval = FALSE}
+#!/bin/bash
+# Runs fastp in PE mode for all .fastq.gz files in a directory
+# Run as:
+# ./run_fastp.sh directory_of_samples 
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+FASTP_EXEC="/d/in7/s/fastp/fastp"
+DIR=$1
+ADAPTER_FILE="./adapters_all.fa"
+
+echo "Running fastp using executable: $FASTP_EXEC"
+
+for file in `ls $DIR/*_R1_*.fastq.gz`;
+do
+  sample=${file/$DIR\//}
+  sample=${sample/_R1_001.fastq.gz/}
+  echo "Sample= $sample"
+  $FASTP_EXEC -i  "$DIR/$sample"_R1_001.fastq.gz  \
+              -I  "$DIR/$sample"_R2_001.fastq.gz \
+         -o "$sample"_R1_001_trimmed.fastq.gz \
+         -O "$sample"_R2_001_trimmed.fastq.gz \
+         --adapter_fasta $ADAPTER_FILE \
+         -l 30 --trim_poly_x \
+         -h "$sample"_fastp.html -j "$sample"_fastp.json
+done
+
+```
+
+NOTE: fastp by default uses the following quality filtering options:
+
+- 40% of bases are allowed to be at phred quality Q<15 (unqualified)
+- reads with at least 5 Ns are discarded
+- average quality of the read is not checked by default
+
+
+## Data quality re-analysis with FastQC/multiQC following fastp
+
+Re-ran fastQC with the files in the fastp directory:
+`./run_fastp.sh ../fastp`
+Results in the directory: `$PROJECT/fastqc_after_fastp`
+
+Then re-ran multiqc and moved the .html file locally to save the plots shown below:
+
+![Alt text](multiqc_after_fastp/fastqc_per_base_sequence_quality_plot.png)
+
+![Alt text](multiqc_after_fastp/fastqc_sequence_duplication_levels_plot.png)
+
+![Alt text](multiqc_after_fastp/fastqc_per_base_n_content_plot.png)
+
+![Alt text](multiqc_after_fastp/fastqc_per_sequence_gc_content_plot.png)
+
+![Alt text](multiqc_after_fastp/fastqc_per_sequence_quality_scores_plot.png)
+
+![Alt text](multiqc_after_fastp/fastqc_overrepresented_sequencesi_plot.png)
+
+Results are under `$PROJECT/fastqc_after_fastp/multiqc`
+
+
+
+#### Observations from  re-analysis of quality 
+
+- There are still Ns mostly at the beginning of the reads but these are only in small percentage of reads and only in the first 1-3 bases so will leave  them in.
+- GC content shows the same strange distribution hence this has nothing to do with adapters and either to do with biases in the library creation or, more likely, the rRNA that is still present.
+- Adapters have been successfully removed.
+
+## Merging data from the 4 lanes to have one file per sample
+
+Seeing that there were no strong lane effects, I merged all 4 lanes for each sample (this could have been done following mapping but there really was no evidence here to suggest a lane effect). The new files are in the **$PROJECT/fastp_merged** directory and the script run_fastq_merger.sh is given below:
+
+```{bash, eval = FALSE}
+#!/bin/bash
+# Merges all fastq files for the same sample and same read orientation into single fastqc 
+# Run as:
+# ./run_fastq_merger.sh directory_of_fastq_files sample_name sample_number
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+MERGED_DIR="/d/in16/u/ubcg71a/research/filipe/fastp_merged/"
+
+cd $1
+sample=$2
+samplenum=$3
+echo $(pwd)
+echo Merging for sample $sample 
+cat "$sample"*"$samplenum"*R1_001*fastq.gz > $MERGED_DIR/"$sample"_"$samplenum"_R1.fastq.gz
+cat "$sample"*"$samplenum"*R2_001*fastq.gz > $MERGED_DIR/"$sample"_"$samplenum"_R2.fastq.gz
+```
+
+
+```{bash, eval = FALSE}
+./run_fastq_merger.sh ../fastp/ N1 S5
+./run_fastq_merger.sh ../fastp/ N2 S6
+./run_fastq_merger.sh ../fastp/ N3 S7
+./run_fastq_merger.sh ../fastp/ N4 S8
+./run_fastq_merger.sh ../fastp/ SG1 S1
+./run_fastq_merger.sh ../fastp/ SG2 S2
+./run_fastq_merger.sh ../fastp/ SG3 S3
+./run_fastq_merger.sh ../fastp/ SG4 S4
+```
+
+
+## Mapping processed reads to the genome with STAR
+Before carrying out the analysis with kallisto/sleuth, we will map the reads using **STAR** and carry out some exploratory analysis of the data. 
+
+Aine's work showed a huge number of reads mapping to rRNA.Here, we will allow them to map and exclude them later. During the kallisto run, we will remove them from the transcriptome before mapping to save hassle.
+
+First, we need to create an index of the genome with STAR:
+```{bash, eval=FALSE}
+module load star/v2.7
+
+STAR --runThreadN 8 --runMode genomeGenerate --genomeDir . --genomeFastaFiles ../Caenorhabditis_elegans.WBcel235.dna.toplevel.fa --sjdbGTFfile ../Caenorhabditis_elegans.WBcel235.99.gtf --genomeSAindexNbases 12
+#(note that parameter genomeSAindexNbases must be scaled down to 12 from the default 14 because the genome
+#is smaller than the human genome)
+
+#The genome index is currently under: /d/in16/u/ubcg71a/research/genomes/c.elegans/ensembl_99/STAR_INDEX/
+
+#Once the genome index is created we can map the files using a bash script:
+nohup ./run_star.sh ../fastp/ list_files > & run_star.out &
+#where list_files contains a list of all samples
+#N1_S5
+#N2_S6
+#N4_S8
+#N3_S7
+#SG1_S1
+#SG2_S2
+#SG3_S3
+#SG4_S4
+
+```
+
+The script run_star.sh is given below:
+```{bash, eval=FALSE}
+#!/bin/bash
+
+# Runs STAR mapping on all samples in a given directory 
+# Samples must end in .fastq.gz and are given as a list in a file (second argument)
+
+# Run as:
+# run_star.sh directory_of_fastq_files list_of_samples 
+
+timestamp=`date "+%Y%m%d-%H%M%S"`
+logfile="run_$timestamp.log"
+exec > $logfile 2>&1  #all output will be logged to logfile
+
+dir=$1
+shift
+
+#set location of executables
+STAR_EXEC="/s/software/STAR/bin/Linux_x86_64/STAR"
+
+numProc=5   #number of processors/threads to be used
+genomeIndex="/d/in16/u/ubcg71a/research/genomes/c.elegans/ensembl_99/STAR_INDEX/" #directory for genome index files 
+
+for sample in `cat $1`;
+do
+   echo "Running STAR on sample $sample (paired-end reads) ..."
+
+   inputFile1="$dir$sample"_R1.fastq.gz
+   inputFile2="$dir$sample"_R2.fastq.gz
+
+   STAR --runThreadN $numProc \
+        --runMode alignReads \
+        --outSAMtype BAM SortedByCoordinate \
+        --readFilesCommand zcat \
+        --genomeDir $genomeIndex \
+        --outFileNamePrefix "$sample"_ \
+        --readFilesIn $inputFile1 $inputFile2 \
+        --outReadsUnmapped Fastx \
+        --quantMode GeneCounts
+
+done
+
+echo "All done!"
+```
+
+STAR produces separate files with the unmapped reads (which we can use, for example, to map to circular RNA transcripts later) and it also produces gene counts. Ideally one should rely on transcript counts for differential gene expression; here we will use gene counts for the exploratory part of the analysis only.
+
+I summarised the STAR output by running multiqc again. Results are under `$PROJECT/star_mapping/multiqc/`
+
+![Alt text](multiqc_after_star/alignment_result.png)
+![Alt text](multiqc_after_star/star_alignment_plot.png)
+![Alt text](multiqc_after_star/star_gene_counts.png)
+
+## Exploratory data analysis with STAR gene counts
+
+## Set up libraries and functions
+```{r session setup, include=FALSE}
+
+library(rtracklayer)
+library(tidyr)
+library(sleuth)
+library(tximport)
+library(dplyr)
+library(ggplot2)
+library(biomaRt)
+library(reactome.db)
+library(goseq)
+library(GO.db)
+library(org.Ce.eg.db)
+library(topGO)
+library(Rgraphviz)
+library(EnhancedVolcano)
+
+options(stringsAsFactors = FALSE)
+
+```
+
+I start by defining my own version of DESeq2's plotPCA() function so that I can define which PCs I will be plotting
+
+```{r myPlotPCA definition}
+#define my own pcaplot to allow other components besides PC1 and PC2 to be plotted
+#the function itself is copied from DESEq2
+myPlotPCA <- function (x, intgroup = "condition", pc1 = 1, pc2 =2, ntop = 500, returnData = FALSE) 
+{
+  rv <- genefilter::rowVars(assay(x)) #if using with SummarizedExperiment objects
+  select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+                                                     length(rv)))]
+  pca <- prcomp(t(assay(x)[select, ]))
+  percentVar <- pca$sdev^2/sum(pca$sdev^2)
+  if (!all(intgroup %in% names(colData(x)))) {
+     stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+  intgroup.df <- as.data.frame(colData(x)[, intgroup, drop = FALSE])
+  group <- if (length(intgroup) > 1) {
+            factor(apply(intgroup.df, 1, paste, collapse = " : "))
+        }
+        else {
+            colData(x)[[intgroup]]
+        }
+  
+  d <- data.frame(PC1 = pca$x[, pc1], PC2 = pca$x[, pc2], group = group, 
+                  intgroup.df, names = colnames(x))
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[c(pc1,pc2)]
+    return(d)
+  }
+  ggplot(data = d, 
+         aes_string(x = "PC1", y = "PC2",  color = "group"))+
+    geom_point(size=3) +
+    xlab(paste0("PC",pc1,": ", round(percentVar[pc1] * 100), "% variance")) +
+    ylab(paste0("PC",pc2,": ", round(percentVar[pc2] * 100), "% variance"))
+}
+```
+
+
+## Using rtracklayer and the gtf file to obtain gene names
+```{r gene_info_from_gtf}
+gtf <- rtracklayer::import('genomes/Caenorhabditis_elegans.WBcel235.99.gtf')
+gtf_df=as.data.frame(gtf)
+t2g <- data.frame(target_id = gtf_df$transcript_id,
+                  ens_gene = gtf_df$gene_id,
+                  ext_gene = gtf_df$gene_name)
+t2g <- t2g %>% drop_na()
+t2g <- dplyr::distinct(t2g)
+
+```
+
+The gene counts are in the .tab files of STAR. I moved those locally and use code from:
+http://biostars.org/p/241602
+to read in counts so they can be used with DESeq2.
+
+```{r EDA with STAR gene counts and DESEq2, eval=TRUE}
+
+library(ggplot2)
+library(DESeq2)
+
+#First, read in the gene counts from STAR
+number<- 4 #reverse-stranded library so counts should be in column 4
+ff <- list.files( path = "./star_mapping", pattern = "*ReadsPerGene.out.tab$", full.names = TRUE )
+counts.files <- lapply( ff, read.table, skip = 4 )
+starcounts <- as.data.frame( sapply( counts.files, function(x) x[ , number ] ) )
+ff <- gsub( "[_]ReadsPerGene[.]out[.]tab", "", ff )
+ff <- gsub( "[.]/star_mapping/", "", ff )
+colnames(starcounts) <- ff
+row.names(starcounts) <- counts.files[[1]]$V1
+rm(counts.files)
+
+coldata <- read.table("metadata.txt", header=T)
+rownames(coldata) <- coldata[,1]
+coldata
+
+#Check row and column names match in the same order
+rownames(coldata)  == colnames(starcounts)
+
+dds = DESeqDataSetFromMatrix(countData = starcounts, 
+                             colData = coldata, 
+                             design = ~ condition )
+
+dds
+
+#pre-filter to remove genes with too few counts
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds
+
+#check quickly the distribution of the other counts
+quantile(rowSums(counts(dds)))
+#and in more detail
+quantile(rowSums(counts(dds)), probs=seq(0.9,1,0.005))
+
+vsd <- vst(dds, blind=TRUE)
+
+plotPCA(vsd, intgroup=c("condition"))
+
+```
+
+This initial PCA looks promising with good separation of the samples. However, the rRNAs remain in the counts as shown above and they could be skewing the results.
+
+We need to remove all counts corresponding to rRNA transcript_biotype reads (there are 23) - the genome/transcriptome files are from Ensembl and can be found in this directory: **/d/in16/u/ubcg71a/research/genomes/c.elegans**
+```{bash, eval = FALSE}
+ zcat Caenorhabditis_elegans.WBcel235.cdna_and_ncrna.fa.gz | grep biotype:rRNA > list_of_biotype_rRNA_transcripts.txt
+ 
+#keep gene names only
+awk '{print $4}' list_of_biotype_rRNA_transcripts.txt | sed 's/gene://' | sed 's/\..//' > list_biotype_rRNA_genes.txt
+
+```
+
+We will now move this list of rRNA genes locally and use it to filter out the unwanted counts.
+
+```{r EDA with STAR gene counts and DESEq2 no rRNAs, eval=TRUE}
+
+library("pheatmap")
+
+#clean up
+rm(ff, coldata, starcounts, dds, vsd)
+
+number<- 4 #reverse-stranded library so counts should be in column 4
+ff <- list.files( path = "./star_mapping", pattern = "*ReadsPerGene.out.tab$", full.names = TRUE )
+counts.files <- lapply( ff, read.table, skip = 4 )
+starcounts <- as.data.frame( sapply( counts.files, function(x) x[ , number ] ) )
+ff <- gsub( "[_]ReadsPerGene[.]out[.]tab", "", ff )
+ff <- gsub( "[.]/star_mapping/", "", ff )
+colnames(starcounts) <- ff
+row.names(starcounts) <- counts.files[[1]]$V1
+rm(counts.files)
+
+coldata <- read.table("metadata.txt", header=T)
+rownames(coldata) <- coldata[,1]
+coldata
+
+#Check row and column names match in the same order
+rownames(coldata)  == colnames(starcounts)
+
+#now remove the rRNAs from the counts table
+rRNAgenes <- read.table(file="list_biotype_rRNA_genes.txt", header=F)
+rRNAgenes
+
+starcounts.norRNA <- starcounts[!row.names(starcounts)%in%rRNAgenes[,1],]
+dim(starcounts)
+dim(starcounts.norRNA)
+dim(rRNAgenes)
+
+rm(starcounts) #clean up
+dds = DESeqDataSetFromMatrix(countData = starcounts.norRNA, 
+                             colData = coldata, 
+                             design = ~ condition )
+
+dds
+
+#pre-filter to remove genes with too few counts
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds
+
+#check quickly the distribution of the other counts
+quantile(rowSums(counts(dds)))
+#and in more detail
+quantile(rowSums(counts(dds)), probs=seq(0.9,1,0.005))
+
+#show the genes that still have very large counts
+i<- rowSums(counts(dds)) >= 100000
+assay(dds)[i,]
+
+#Check correlation between raw gene expression vectors for all samples (without log transformation)
+pairs(assay(dds))
+#and following log transformation
+pairs(log(assay(dds)+0.5)) #add 0.5 as pseudocount
+cor.mat <- cor(assay(dds))
+cor.mat
+pheatmap(cor.mat, legend=T)
+
+#Transform the counts 
+vsd <- vst(dds, blind=TRUE)
+plotPCA(vsd, intgroup=c("condition"))
+#As expected the PCA is not changed much because we only removed a few genes
+
+#try rlog
+rld <- rlog(dds, blind = TRUE)
+plotPCA(rld, intgroup=c("condition"))
+
+#we can improve the plot a bit by highlighting the replicate number in different shape
+pcaData <- plotPCA(vsd, intgroup=c("condition", "sample"), returnData=TRUE)
+pcaData$replicate <- sub(pattern= ".*(.)_.*", 
+                         replacement="\\1", 
+                         perl=TRUE, fixed=FALSE, 
+                         x=pcaData$sample)
+pcaData
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=replicate)) +
+geom_point(size=3) +
+xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+coord_fixed()
+
+pcaData <- myPlotPCA(vsd, pc1= 2, pc2= 3, intgroup=c("condition", "sample"), returnData=TRUE)
+pcaData$replicate <- sub(pattern= ".*(.)_.*", 
+                         replacement="\\1", 
+                         perl=TRUE, fixed=FALSE, 
+                         x=pcaData$sample)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=condition, shape=replicate)) +
+geom_point(size=3) +
+xlab(paste0("PC2: ",percentVar[1],"% variance")) +
+ylab(paste0("PC3: ",percentVar[2],"% variance")) +
+coord_fixed()
+
+#Check correlation between transformed gene expression vectors for all samples
+pairs(assay(vsd))
+cor.mat <- cor(assay(vsd))
+cor.mat
+pheatmap(cor.mat, legend=T)
+
+```
+
+Next, we carry out differential gene expression based on the gene counts from STAR
+mapping. Note that this approach is now pretty much deprecated and replaced by transcript-based analysis summarised at the gene level so we won't really analyse the results here but add them here for completion.
+
+```{r Old-style differential gene expression with DESeq2}
+#BiocManager::install("apeglm")
+library(apeglm) #to use in the lfcShrink function
+
+dds <- DESeq(dds) #estimates size factors and dispersions and fits the model
+res <- results(dds)
+res
+
+#next we want to shrink the LFC to help visualisation and ranking of genes
+resultsNames(dds)
+resLFC <- lfcShrink(dds, coef="condition_neurexin_vs_control", type="apeglm")
+resLFC
+
+#MA plot
+plotMA(resLFC, ylim=c(-2,2))
+#contrast with the same plot but for the unshrunken log fold changes
+plotMA(res, ylim=c(-2,2))
+
+#plot top few genes
+resLFCOrdered <- resLFC[order(resLFC$pvalue),]
+resLFCOrdered[1:10,]
+rm(resLFC)
+for (i in 1:10) {
+ plotCounts(dds, gene=rownames(resLFCOrdered)[i], intgroup="condition")
+}
+
+
+```
+
+## Further exploration of the data using the pcaExplorer package in R (just trying out - DO NOT INCLUDE)
+
+```{r EDA with pcaExplorer, eval =FALSE}
+#devtools::install_github("rstudio/d3heatmap") #doesn't install otherwise
+#BiocManager::install("pcaExplorer")
+
+library(pcaExplorer)
+
+#need a mapping from Ensembl ids to gene names; will use a t2g subset; row names must map gene ids
+t2g.sub <- t2g[,c("ens_gene", "ext_gene")]
+t2g.sub<- dplyr::distinct(t2g.sub)
+rownames(t2g.sub) <- t2g.sub[,"ens_gene"]
+colnames(t2g.sub) <- c("ens_gene", "gene_name")
+
+#pcaExplorer(dds = dds, dst = vsd, annotation= t2g.sub)
+
+#Conclusion: Good for quick exploration but the output downloaded plot for loadings did not agree with the one shown online so I'm not sure how buggy it is....(on another trial it worked...)
+#Will explore loadings outside this...
+
+```
+
+![Alt text](results/pcaExplorer/pcae_hiload.pdf)
+
+## Further exploration of the data using the PCAtools package from Bioconductor
+
+```{r EDA with PCAtools}
+
+#BiocManager::install('PCAtools')
+
+library(PCAtools)
+
+p<- pca(assay(vsd), metadata=coldata)
+
+screeplot(p)
+
+biplot(p, colby="condition")
+
+pairsplot(p, colby= "condition")
+
+plotloadings(p)
+
+loadings(p)[which.max(abs(loadings(p)$PC1)),]
+loadings(p)[which.max(abs(loadings(p)$PC2)),]
+
+```
+
+Observations from PCA loadings plot:
+
+- Largest contribution to PC1 is from gene WBGene00008862 (F15D4.5). There is very little annotation for this gene, except that it plays some regulatory role and interacts with deps-1, a gene localized to P granules. HHblits hits almost exclusively uncharacterised proteins but the C-terminal seems to map to CCHC-type domains (which are zinc fingers). It also hits some Pro-Pol polyproteins across a much larger part of the protein sequence (again at the C-terminus)
+- Large negative loadings for PC1: 
+  WBGene00016627 (C44B7.5), an orthologue of human ferric chelate reductase 1. Human orthologues of this gene are implicated in early infantile epileptic encephalopathy 37. 
+  WBGene00021468 (epg-2), involved in macroautophagy and negative regulation of autophagosome assmebly.
+- Largest (negative) loading for PC2:
+  WBGene00010965 (ctc-2), cytochrome c oxidase activity, affected by daf-2
+
+
+# Differential expression analysis based on isoform quantification from *kallisto*
+## Dealing with ribosomal RNAs
+Aine's work showed a huge number of reads mapping to rRNA.
+I've decided it's probably best to remove them BEFORE proceeding with
+anything else so we don't have to worry about them later.
+I saw that many people use bwa or bowtie2 for this but rRNAs of
+eukaryotes can also have introns so would need a spliced aligner.
+Other solutions; BBsplit from BBmap can split reads from different references
+but does it based on k-mers. SortMeRNA also removes reads that map to
+a set of sequences (used mostly with prokaryotes and metagenomes..would need
+to check if it works well with eukaryotes).
+
+I decided in the end that the easiest solution might be to rebuild the index
+that kallisto uses and re-run kallisto so that the rRNAs are not part
+of the reference transcriptome, allowing the reads to remain unmapped (hopefully!).
+
+We need to remove all sequences with  rRNA transcript_biotype reads (there are 23) - the genome/transcriptome files are from Ensembl and can be found in this directory: **/d/in16/u/ubcg71a/research/genomes/c.elegans**
+```{bash, eval = FALSE}
+ zcat Caenorhabditis_elegans.WBcel235.cdna_and_ncrna.fa.gz | grep biotype:rRNA > list_of_biotype_rRNA_transcripts.txt
+```
+
+Found a one-liner online to do this easily (basically, stitches the lines together separated by "\t", greps and then
+separates again with newlines:
+```{bash, eval = FALSE}
+zcat Caenorhabditis_elegans.WBcel235.cdna_and_ncrna.fa.gz | awk '{ if ((NR>1)&&($0~/^>/)) { printf("\n%s", $0); } else if (NR==1) { printf("%s", $0); } else { printf("\t%s", $0); } }' | grep -vFf pattern.txt - | tr "\t" "\n" > Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.fa
+```
+Checking:
+```{bash, eval = FALSE}
+grep ">" Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.fa | wc
+61428
+zcat Caenorhabditis_elegans.WBcel235.cdna_and_ncrna.fa.gz | grep ">" | wc
+61451
+
+wc list_of_biotype_rRNA_transcripts.txt
+23
+```
+
+Then zip the final .fa file:
+```{bash, eval = FALSE}
+gzip -9 Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.fa
+```
+
+## Indexing the transcriptome with kallisto
+(all transcriptome files are under: **/d/in16/u/ubcg71a/research/genomes/c.elegans** See README for how they were obtained):
+
+```{bash, eval = FALSE}
+/d/in7/s/kallisto/kallisto_linux-v0.46.1/kallisto index -i Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.index Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.fa.gz
+```
+
+## Pseudo-mapping with *kallisto*
+This blog: http://genomespot.blogspot.com/2015/08/how-accurate-is-kallisto.html
+suggests that the difference between trimming before kallisto or not trimming does not make a huge difference overall.
+
+So I did not run Trimmomatic on top of fastp as I would have done if we were
+mapping with STAR or similar.
+
+Running first without pseudoalignment (which takes a lot more time and space) but with bootstrapping (this is run in the directory **$PROJECT/kallisto_with_ncRNA_norRNA/**):
+
+```{bash, eval = FALSE}
+nohup ./run_kallisto.sh ../fastp_merged/ N1_S5 N2_S6 N3_S7 N4_S8 SG1_S1 SG2_S2 SG3_S3 SG4_S4 >& run_kallisto.out &
+```
+
+I got initially rather low mapping rates (about 20%) and was worried I had the orientation
+of the reads wrong. I reversed the orientation and that gave less than 1% alignment
+so that was clearly not the problem. In this forum:
+https://github.com/pachterlab/kallisto/issues/198
+there is a suggestion that the culprit is ncRNAs that are not included in the
+transcriptome file, which would make sense since we know that 80% of the reads
+are to rRNA in this case.
+
+I re-did the run with a transcriptome that had ncRNA too. Now, alignment jumpted to
+98.2% so the ncRNA missing was definitely the problem here (rRNA really..)
+These results were under **kallisto_with_ncRNA**, a directory that I eventually deleted to save space. The results without ncRNA are now renamed to **kallisto_cDNA**
+NOTE: the abundance estimates for the bootstrap are not written by default to the
+csv file but they can be written out using:
+```{bash, eval = FALSE}
+/d/in7/s/kallisto/kallisto_linux-v0.46.1/kallisto h5dump -o output abundance.h5
+```
+(where output is a directory where the results will be saved)
+
+I will probably keep both versions and run sleuth with both to see whether there
+are any differences that affect the coding genes too.
+
+Finally, I re-did the run with a transcriptome that had ncRNA but no rRNA. I then
+deleted the previous run that had ncRNA, including rRNAs to save space.
+So the kallisto_with_ncRNA directory has now been replaced with:
+**kallisto_with_ncRNA_norRNA**
+Alignment rates: p_unique: 9-10%, p_pseudoaligned: ~20%
+
+
+I also did one re-run with ncRNA and no bootstrap but asking for pseudo-alignment to
+the genome so that we could get pseudo-bam files for visualisation:
+In directory: **/d/in16/u/ubcg71a/research/filipe/kallisto_with_ncRNA_norRNA/pseudo_bam/**
+
+```{bash, eval =FALSE}
+nohup ./run_kallisto_pseudobam.sh ../../fastp_merged/ N1_S5 N2_S6 N3_S7 N4_S8 SG1_S1 SG2_S2 SG3_S3 SG4_S4 >& run_kallisto.out &
+```
+
+## Gene-level differential expression using kallisto counts and sleuth 
+
+This approach is following the code from: https://github.com/pachterlab/aggregationDE/blob/master/R/gene_pipeline
+and the procedure of aggregating p-values after **transcript** differential expression has been
+carried out to call differentially expressed genes (see paper by Yi et al:
+doi: 10.1186/s13059-018-1419-z).
+
+### Setup directories and variables
+
+```{r setup for sleuth and directories}
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+setwd("~/Dropbox/work/research/Filipe_neurexin/NEW_PROCESS/")
+
+#sample_id <- dir(file.path(".", "kallisto_cdna"))
+sample_id <- dir(file.path(".", "kallisto_with_ncRNA_norRNA"))
+sample_id
+
+#kal_dirs <- file.path(".", "kallisto_cdna", sample_id)
+kal_dirs <- file.path(".", "kallisto_with_ncRNA_norRNA", sample_id)
+
+```
+
+### Read in metadata
+Sleuth requires metadata information corresponding to the samples in the dataset. In this case, the metadata is very simple and was already created outside the R script. We simply
+need to add to this table the directories where kallisto results are saved.
+```{r metadata}
+s2c <- read.table("./metadata.txt",  header = TRUE, stringsAsFactors=FALSE)
+s2c
+s2c <- dplyr::mutate(s2c, path = kal_dirs)
+s2c
+```
+
+### Using biomaRt to map transcript ids to gene names and descriptions
+We will get gene names from biomaRt to add to the transcript IDs we have from sleuth
+```{r biomart}
+ens <- useMart("ensembl")
+attr = c("ensembl_gene_id", 
+         "ensembl_transcript_id",
+         "description",
+         "external_gene_name",
+         "entrezgene_id")
+celeg <- useMart("ensembl",
+                   dataset = "celegans_gene_ensembl")
+
+t2g <- getBM(attributes = attr,
+              mart = celeg)
+
+t2g <- dplyr::rename(t2g, 
+                     target_id = ensembl_transcript_id,
+                     ens_gene = ensembl_gene_id, 
+                     ext_gene = external_gene_name)
+
+```
+
+### Differential expression with sleuth
+```{r gene_diff_exp_transcript}
+#### GENE-LEVEL-ANALYSIS ####
+#Following code from: https://github.com/pachterlab/aggregationDE/blob/master/R/gene_pipeline.R
+design <- ~ condition
+so <- sleuth_prep(s2c,
+                  full_model = design,
+                  read_bootstrap_tpm = TRUE,
+                  extra_bootstrap_summary=TRUE,
+                  target_mapping = t2g,
+                  transformation_function = function(x) log2(x + 0.5), #change the natural log fold change to log2 fold change
+                  aggregation_column = 'ens_gene'
+                  #filter_target_id=txfilter
+                  )
+
+so <- sleuth_fit(so, ~condition, 'full')
+
+#do a Wald test first
+so <- sleuth_wt(so, which_beta='conditionneurexin', which_model='full')
+sleuth_table_wt <- sleuth_results(so, 
+                                  test= 'conditionneurexin', 
+                                  test_type =  'wt',
+                                  which_model = 'full')
+sleuth_table_wt
+sleuth_significant_wt <- dplyr::filter(sleuth_table_wt, qval <= 0.05)
+dim(sleuth_significant_wt)
+head(sleuth_significant_wt, 20)
+
+#and then a LRT test
+so <- sleuth_fit(so, ~1, 'null')
+so <- sleuth_lrt(so, 'null', 'full')
+sleuth_table_lrt <- sleuth_results(so, test='null:full', 'lrt')
+sleuth_table_lrt
+sleuth_significant_lrt <- dplyr::filter(sleuth_table_lrt, qval <= 0.05)
+dim(sleuth_significant_lrt)
+head(sleuth_significant_lrt, 20)
+
+#Note: The Wald test usually returns more hits than the likelihood ratio test
+
+#check counts for top significant genes in WT
+selected_gene <- sleuth_significant_wt$target_id[1]
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene==selected_gene))$target_id[1], units = "est_counts", color_by = "condition")
+selected_gene <- sleuth_significant_wt$target_id[2]
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene==selected_gene))$target_id[1], units = "est_counts", color_by = "condition")
+selected_gene <- sleuth_significant_wt$target_id[3]
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene==selected_gene))$target_id[1], units = "est_counts", color_by = "condition")
+
+
+#save the gene differential expression results so they can be used with web servers for further analysis
+
+#check the table has no duplicate entries
+length(unique(sleuth_table_wt$target_id)) == length(sleuth_table_wt$target_id)
+
+write.table(sleuth_significant_wt$target_id, file="results/sleuth_significant_q005_NEW.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
+
+#avoid using this - pointless
+write.table(dplyr::filter(sleuth_table_wt, qval > 0.05)$target_id, file="results/bg_genes_good.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
+#use this instead
+write.table(dplyr::filter(sleuth_table_wt, !is.na(qval))$target_id, file="results/bg_genes_all.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
+
+##### TRANSCRIPT-LEVEL ANALYSIS #####
+#To do the transcript-level analysis, simply set the pval_aggregate to FALSE
+#NOTE that target_id will now be the transcript id rather than the gene id
+#We will use the Wald test from here on
+sleuth_table_txn <- sleuth_results(so, 
+                                   test = 'conditionneurexin',
+                                   test_type = 'wt',
+                                   which_model = 'full',
+                                   show_all = TRUE,
+                                   pval_aggregate = FALSE)
+sleuth_table_txn
+sleuth_significant_txn <- dplyr::filter(sleuth_table_txn, qval <= 0.05)
+dim(sleuth_significant_txn)
+head(sleuth_significant_txn, 20)
+write.table(sleuth_significant_txn$target_id, file="results/sleuth_significant_TXN_q005.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
+
+#the transcript table contains beta values too so one can talk about up and down regulated transcripts and genes
+sleuth_significant_txn.up <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b>0))
+head(sleuth_significant_txn.up, 20)
+#we will save the gene ids instead of transcript ones
+write.table(unique(sleuth_significant_txn.up$ens_gene), file="results/sleuth_significant_q005_up.txt", quote=FALSE, row.names = FALSE, col.names = "#ens_gene")
+sleuth_significant_txn.down <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b<0))
+head(sleuth_significant_txn.down, 20)
+write.table(unique(sleuth_significant_txn.down$ens_gene), file="results/sleuth_significant_q005_down.txt", quote=FALSE, row.names = FALSE, col.names = "#ens_gene")
+
+#Summarise some of the numbers
+#all transcripts and genes considered in the analysis
+length(sleuth_table_txn$target_id)
+length(sleuth_table_wt$target_id)
+length(unique(sleuth_table_wt$target_id))
+#transcripts and genes with sleuth data
+sum(sleuth_table_wt$num_aggregated_transcripts, na.rm=TRUE )
+length(sleuth_table_wt[!is.na(sleuth_table_wt$num_aggregated_transcripts),] $target_id)
+#significantly DE genes (aggregated) at q<0.05
+length(sleuth_significant_wt$target_id)
+#significantly DE transcripts
+length(sleuth_significant_txn$target_id)
+
+#Some additional exploratory analysis using sleuth's own functions
+plot_pca(so,
+         color_by = 'condition',
+         text_labels = TRUE)
+#note that using tpm as unit does not result in a great separation along the PC1 
+#the two types of samples are separated but only just (the SGs cluster together though)
+plot_pca(so,
+          color_by = 'condition',
+          text_labels = TRUE, units="tpm")
+
+plot_pca(so,
+         pc_x=2,
+         pc_y=3,
+         color_by = 'condition',
+         text_labels = TRUE)
+
+plot_pca(so,
+         pc_x=2,
+         pc_y=8,
+         color_by = 'condition',
+         text_labels = TRUE)
+
+#how much of the variance is accounted for by each PC?
+plot_pc_variance(obj = so, units = "est_counts")
+plot_pc_variance(obj = so, units = "tpm")
+
+#note PC8 also separates the samples
+plot_loadings(so, pc_input=1)
+plot_loadings(so, pc_input=2)
+plot_loadings(so, pc_input=3)
+plot_loadings(so, pc_input=8) 
+#note that all influential genes in PCA seem to be very highly expressed (over 1000 tpm)
+
+plot_group_density(so,
+                   use_filtered = FALSE,
+                   units = "est_counts",
+                   trans = "log",
+                   grouping = "condition")
+
+
+plot_group_density(so,
+                   use_filtered = TRUE,
+                   units = "est_counts",
+                   trans = "log",
+                   grouping = "condition")
+
+
+plot_sample_heatmap(so)
+
+#check whether there are sex differences
+#list of sex determining genes is from: 
+#https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2619291/pdf/324.pdf
+list.sex_genes <- c("xol-1", "sdc-1", "sdc-2", 
+                    "her-1", "tra-2", "tra-3", 
+                    "fem-1", "fem-2", "fem-3", "tra-1")
+
+plot_transcript_heatmap(so, 
+                        transcripts=dplyr::filter(sleuth_table_txn, 
+                                                  ext_gene %in% list.sex_genes)$target_id)
+
+#repeat the plot with est_counts instead of tpm
+plot_transcript_heatmap(so, 
+                        transcripts=dplyr::filter(sleuth_table_txn, 
+                                                  ext_gene %in% list.sex_genes)$target_id,
+                        units="est_counts")
+
+
+#ZK287.8b.1 seems to separate two of the normal samples but it's a transcript that 
+#is not used in differential expression due to filtering - below are original counts
+#note that basic filter in sleuth filters out any transcripts with fewer than 5 estimated counts
+#in 47% of the samples (effectively here half of the samples)
+so$obs_raw[so$obs_norm$target_id == "ZK287.8b.1",]
+
+
+#volcano plot for genes
+#Note: there is a problem with volcano and MA plots not setting hte p-value aggregate to FALSE when reading
+#results from the WT test and thus not realising there is a b column
+#Error reported is: 
+#Error in FUN(X[[i]], ...) : object 'b' not found
+#To fix this, manually set the pval_aggregate in so before supplying to plots as suggested here:
+#https://github.com/pachterlab/sleuth/issues/233
+# so$pval_aggregate <- FALSE
+# plot_volcano(obj=so, 
+        # test = "conditionneurexin", 
+        # test_type = "wt", 
+        # which_model="full", 
+        # sig_level = 0.05, 
+        # sig_color = "red")
+#can also do MA plot
+# plot_ma(obj=so, 
+        # test = "conditionneurexin", 
+        # test_type = "wt", 
+        # which_model="full", 
+        # sig_level = 0.05, 
+        # sig_color = "red")
+# ALTERNATIVELY
+#use the EnhancedVolcano package and function to make nicer plots and to also highlight 
+#genes easily (the highlight function in plot_volcano from sleuth is not working for me)
+
+#not used as using cutoffs within the volcano plot options
+#select.lab <- head(sleuth_significant_txn, 20)$target_id
+
+#use the same function that plot_volcano() uses to produce the data frame needed to make the plot
+toptable <- sleuth_results(so, 
+                           test="conditionneurexin", 
+                           test_type="wt", 
+                           which_model="full",
+                           pval_aggregate=FALSE,
+                           rename_cols=FALSE,
+                           show_all=FALSE)
+toptable <- dplyr::mutate(toptable, significant = qval < 0.05)
+dim(dplyr::filter(toptable, abs(b)>1))
+#there are 2045 transcripts
+
+EnhancedVolcano(
+     toptable=toptable,
+     lab=toptable$target_id,
+     x='b',
+     y='qval',
+     xlab="beta_value",
+     selectLab = NULL,
+     title="Sleuth results (without p-value aggregation)",
+     subtitle="",
+     legend=c("NS","beta","P","P & beta"),
+     legendLabels=c("NS","beta","P","P & beta"),
+     transcriptLabSize=5.0,
+     pLabellingCutoff=10e-6,
+     FCcutoff=1.0
+     )
+
+#create a table with information about top 10 most significant genes
+select.res <- dplyr::filter(toptable, abs(b)>1)[1:10,c(1,2,5,6,7)]
+dplyr::filter(t2g, target_id %in% select.res$target_id)
+merge(x=select.res, y=dplyr::filter(t2g, target_id %in% select.res$target_id), by="target_id", sort=FALSE, no.dups=TRUE)[,c("target_id","ext_gene","entrezgene_id.x","qval","description")]
+
+#Examine some bootstrapped counts for individual transcripts of the same gene
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[1], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[2], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[3], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[4], units = "est_counts", color_by = "condition")
+
+#use the shiny app when not knitting the document
+#sleuth_live(so)
+```
+
+## Session information
+```{r session_info}
+sessionInfo()
+#save.image(file="neurexin_analysis.Rdata")
+```
