@@ -7,6 +7,29 @@ editor_options:
   chunk_output_type: console
 ---
 
+## Set up libraries and functions
+```{r session setup, include=FALSE}
+
+library(rtracklayer)
+library(tidyr)
+library(sleuth)
+library(tximport)
+library(dplyr)
+library(ggplot2)
+library(biomaRt)
+library(reactome.db)
+library(goseq)
+library(GO.db)
+library(org.Ce.eg.db)
+library(topGO)
+library(Rgraphviz)
+library(EnhancedVolcano)
+library(pheatmap)
+
+options(stringsAsFactors = FALSE)
+
+```
+
 # Analysis of RNA-seq data from a neurexin-deficient worm
 
 ## Introduction
@@ -93,6 +116,22 @@ Diagnostic plots from FASTQC summarised with multiQC (in all these plots, files 
 - There are some Ns mostly at the beginning of the reads
 - GC content shows strange distribution with differences between R1 and R2 (I've seen this before in datasets; maybe bias from the bias due to adapters still present?). GC of C. elegans is supposed to have mean base composition of 36% GC (with the rRNA cistrons being closer to 51%; ref: PMID: 4858229). Our plots show higher GC content in all cases but there is a peak where rRNA should be.
 - There is evidence of adapters present in the 3' end
+
+I saved the statistics table from multiqc and read it in here to summarise:
+```{r mutliqc_initial_stats}
+t.stats <- read.table(file="multiqc/stats.txt", header=TRUE, sep="\t")
+#use tidyr's separate to split the first column
+t.stats <- separate(t.stats, Sample.Name, into=c("sample", "sample_num", "lane", "read", "nothing"), sep="_", remove=FALSE, convert=FALSE)
+summary(t.stats$M.Seqs)
+
+#print statistics per group
+t.stats %>% group_by(sample) %>% summarize(mean=mean(M.Seqs))
+t.stats %>% group_by(lane) %>% summarize(mean=mean(M.Seqs))
+t.stats %>% group_by(sample) %>% summarize(mean=mean(X..Dups))
+t.stats %>% group_by(lane) %>% summarize(mean=mean(X..Dups))
+t.stats %>% group_by(sample) %>% summarize(mean=mean(X..GC))
+t.stats %>% group_by(lane) %>% summarize(mean=mean(X..GC))
+```
 
 ## Read pre-processing with fastp
 I trimmed (adapters and poly(A) tails) and quality-filtered the reads using the program *fastp* :
@@ -296,28 +335,6 @@ I summarised the STAR output by running multiqc again. Results are under `$PROJE
 
 ## Exploratory data analysis with STAR gene counts
 
-## Set up libraries and functions
-```{r session setup, include=FALSE}
-
-library(rtracklayer)
-library(tidyr)
-library(sleuth)
-library(tximport)
-library(dplyr)
-library(ggplot2)
-library(biomaRt)
-library(reactome.db)
-library(goseq)
-library(GO.db)
-library(org.Ce.eg.db)
-library(topGO)
-library(Rgraphviz)
-library(EnhancedVolcano)
-
-options(stringsAsFactors = FALSE)
-
-```
-
 I start by defining my own version of DESeq2's plotPCA() function so that I can define which PCs I will be plotting
 
 ```{r myPlotPCA definition}
@@ -413,6 +430,7 @@ quantile(rowSums(counts(dds)), probs=seq(0.9,1,0.005))
 
 vsd <- vst(dds, blind=TRUE)
 
+#note that by default only the top 500 genes in terms of variance are used for this PCA plot
 plotPCA(vsd, intgroup=c("condition"))
 
 ```
@@ -491,6 +509,7 @@ pairs(log(assay(dds)+0.5)) #add 0.5 as pseudocount
 cor.mat <- cor(assay(dds))
 cor.mat
 pheatmap(cor.mat, legend=T)
+#This all looks good - Ns correlate better with each other than with SGs and vice versa.
 
 #Transform the counts 
 vsd <- vst(dds, blind=TRUE)
@@ -510,10 +529,11 @@ pcaData$replicate <- sub(pattern= ".*(.)_.*",
 pcaData
 percentVar <- round(100 * attr(pcaData, "percentVar"))
 ggplot(pcaData, aes(PC1, PC2, color=condition, shape=replicate)) +
-geom_point(size=3) +
-xlab(paste0("PC1: ",percentVar[1],"% variance")) +
-ylab(paste0("PC2: ",percentVar[2],"% variance")) +
-coord_fixed()
+    geom_point(size=3) +
+    xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+    ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+    coord_fixed() +
+    ggtitle(label="STAR counts, transformed with vsd")
 
 pcaData <- myPlotPCA(vsd, pc1= 2, pc2= 3, intgroup=c("condition", "sample"), returnData=TRUE)
 pcaData$replicate <- sub(pattern= ".*(.)_.*", 
@@ -522,10 +542,10 @@ pcaData$replicate <- sub(pattern= ".*(.)_.*",
                          x=pcaData$sample)
 percentVar <- round(100 * attr(pcaData, "percentVar"))
 ggplot(pcaData, aes(PC1, PC2, color=condition, shape=replicate)) +
-geom_point(size=3) +
-xlab(paste0("PC2: ",percentVar[1],"% variance")) +
-ylab(paste0("PC3: ",percentVar[2],"% variance")) +
-coord_fixed()
+    geom_point(size=3) +
+    xlab(paste0("PC2: ",percentVar[1],"% variance")) +
+    ylab(paste0("PC3: ",percentVar[2],"% variance")) +
+    coord_fixed()
 
 #Check correlation between transformed gene expression vectors for all samples
 pairs(assay(vsd))
@@ -693,7 +713,7 @@ there is a suggestion that the culprit is ncRNAs that are not included in the
 transcriptome file, which would make sense since we know that 80% of the reads
 are to rRNA in this case.
 
-I re-did the run with a transcriptome that had ncRNA too. Now, alignment jumpted to
+I re-did the run with a transcriptome that had ncRNA too. Now, alignment jumped to
 98.2% so the ncRNA missing was definitely the problem here (rRNA really..)
 These results were under **kallisto_with_ncRNA**, a directory that I eventually deleted to save space. The results without ncRNA are now renamed to **kallisto_cDNA**
 NOTE: the abundance estimates for the bootstrap are not written by default to the
@@ -777,6 +797,9 @@ t2g <- dplyr::rename(t2g,
 ```
 
 ### Differential expression with sleuth
+
+We first carry out differential expression with sleuth, summarised at the gene level (using p-value aggregation).
+
 ```{r gene_diff_exp_transcript}
 #### GENE-LEVEL-ANALYSIS ####
 #Following code from: https://github.com/pachterlab/aggregationDE/blob/master/R/gene_pipeline.R
@@ -786,7 +809,7 @@ so <- sleuth_prep(s2c,
                   read_bootstrap_tpm = TRUE,
                   extra_bootstrap_summary=TRUE,
                   target_mapping = t2g,
-                  transformation_function = function(x) log2(x + 0.5), #change the natural log fold change to log2 fold change
+                  transform_fun_counts = function(x) log2(x + 0.5), #change the natural log fold change to log2 fold change
                   aggregation_column = 'ens_gene'
                   #filter_target_id=txfilter
                   )
@@ -799,7 +822,8 @@ sleuth_table_wt <- sleuth_results(so,
                                   test= 'conditionneurexin', 
                                   test_type =  'wt',
                                   which_model = 'full')
-sleuth_table_wt
+dim(sleuth_table_wt)
+sleuth_table_wt[1:5,]
 sleuth_significant_wt <- dplyr::filter(sleuth_table_wt, qval <= 0.05)
 dim(sleuth_significant_wt)
 head(sleuth_significant_wt, 20)
@@ -808,7 +832,7 @@ head(sleuth_significant_wt, 20)
 so <- sleuth_fit(so, ~1, 'null')
 so <- sleuth_lrt(so, 'null', 'full')
 sleuth_table_lrt <- sleuth_results(so, test='null:full', 'lrt')
-sleuth_table_lrt
+sleuth_table_lrt[1:5,]
 sleuth_significant_lrt <- dplyr::filter(sleuth_table_lrt, qval <= 0.05)
 dim(sleuth_significant_lrt)
 head(sleuth_significant_lrt, 20)
@@ -836,17 +860,24 @@ write.table(dplyr::filter(sleuth_table_wt, qval > 0.05)$target_id, file="results
 #use this instead
 write.table(dplyr::filter(sleuth_table_wt, !is.na(qval))$target_id, file="results/bg_genes_all.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
 
+
+```
+
+Next, we extract differential expression results from the same sleuth object but this time we do not aggregate p-values so our target IDs are transcript IDs.
+
+```{r transcript_diff_expression}
+
 ##### TRANSCRIPT-LEVEL ANALYSIS #####
 #To do the transcript-level analysis, simply set the pval_aggregate to FALSE
 #NOTE that target_id will now be the transcript id rather than the gene id
-#We will use the Wald test from here on
+#We will use the Wald test only from here on
 sleuth_table_txn <- sleuth_results(so, 
                                    test = 'conditionneurexin',
                                    test_type = 'wt',
                                    which_model = 'full',
                                    show_all = TRUE,
                                    pval_aggregate = FALSE)
-sleuth_table_txn
+sleuth_table_txn[1:5,]
 sleuth_significant_txn <- dplyr::filter(sleuth_table_txn, qval <= 0.05)
 dim(sleuth_significant_txn)
 head(sleuth_significant_txn, 20)
@@ -874,11 +905,248 @@ length(sleuth_significant_wt$target_id)
 #significantly DE transcripts
 length(sleuth_significant_txn$target_id)
 
+
+#volcano plot for genes
+#Note: there is a problem with volcano and MA plots not setting hte p-value aggregate to FALSE when reading
+#results from the WT test and thus not realising there is a b column
+#Error reported is: 
+#Error in FUN(X[[i]], ...) : object 'b' not found
+#To fix this, manually set the pval_aggregate in so before supplying to plots as suggested here:
+#https://github.com/pachterlab/sleuth/issues/233
+# so$pval_aggregate <- FALSE
+# plot_volcano(obj=so, 
+        # test = "conditionneurexin", 
+        # test_type = "wt", 
+        # which_model="full", 
+        # sig_level = 0.05, 
+        # sig_color = "red")
+#can also do MA plot
+# plot_ma(obj=so, 
+        # test = "conditionneurexin", 
+        # test_type = "wt", 
+        # which_model="full", 
+        # sig_level = 0.05, 
+        # sig_color = "red")
+# ALTERNATIVELY
+#use the EnhancedVolcano package and function to make nicer plots and to also highlight 
+#genes easily (the highlight function in plot_volcano from sleuth is not working for me)
+
+#not used as using cutoffs within the volcano plot options
+#select.lab <- head(sleuth_significant_txn, 20)$target_id
+
+#use the same function that plot_volcano() uses to produce the data frame needed to make the plot
+toptable <- sleuth_results(so, 
+                           test="conditionneurexin", 
+                           test_type="wt", 
+                           which_model="full",
+                           pval_aggregate=FALSE,
+                           rename_cols=FALSE,
+                           show_all=FALSE)
+toptable <- dplyr::mutate(toptable, significant = qval < 0.05)
+dim(dplyr::filter(toptable, abs(b)>1))
+#there are 2045 transcripts
+
+EnhancedVolcano(
+     toptable=toptable,
+     lab=toptable$target_id,
+     x='b',
+     y='qval',
+     xlab="beta_value",
+     selectLab = NULL,
+     title="Sleuth results (without p-value aggregation)",
+     subtitle="",
+     legend=c("NS","beta","P","P & beta"),
+     legendLabels=c("NS","beta","P","P & beta"),
+     transcriptLabSize=5.0,
+     pLabellingCutoff=10e-6,
+     FCcutoff=1.0
+     )
+
+#create a table with information about top 10 most significant genes
+select.res <- dplyr::filter(toptable, abs(b)>1)[1:10,c(1,2,5,6,7)]
+dplyr::filter(t2g, target_id %in% select.res$target_id)
+merge(x=select.res, y=dplyr::filter(t2g, target_id %in% select.res$target_id), by="target_id", sort=FALSE, no.dups=TRUE)[,c("target_id","ext_gene","entrezgene_id.x","qval","description")]
+
+#Examine some bootstrapped counts for individual transcripts of the same gene (note these are log2 transformed by sleuth)
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[1], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[2], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[3], units = "est_counts", color_by = "condition")
+plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[4], units = "est_counts", color_by = "condition")
+
+#use the shiny app when not knitting the document
+#sleuth_live(so)
+```
+
+**A note on sleuth counts**
+
+The "raw" counts of sleuth correspond more or less to assay(dds) in DESeq2.
+The "est_counts" from the normalised data frame (so[["obs_norm""]]) are on a similar scale to raw counts and correlate well.
+The tpm values take into account the length of the genes/transcripts and show reduced correlation to the est_counts.
+Neither est_counts or tpm values are stored as log normalised - a log must be taken, if one wants to have logged values.
+However, when the diff expression results are obtained the mean_obs is
+a value obtained as the log (or log2 if the transformation function has been changed to log2) of the mean of observations across all samples.
+
+As the est_counts are not log-transformed, the PCA plots based on them are likely dominated simply by the genes with very high read counts.
+
+```{r check_counts}
+#pick a gene with large counts
+
+t2g[t2g$target_id == "ZK185.9",]
+
+#DEseq2 counts
+assay(dds)["WBGene00220238",]
+#log2-transformed
+log2(assay(dds)["WBGene00220238",])
+#rlog-transformed
+assay(rld)["WBGene00220238",]
+#raw counts from sleuth
+filter(so[["obs_raw"]], so[["obs_raw"]]$target_id=="ZK185.9")$est_counts
+#normalised counts from_sleuth
+filter(so[["obs_norm"]], so[["obs_norm"]]$target_id=="ZK185.9")$est_counts
+#log2 and normalised counts from sleuth
+mean(log2(filter(so[["obs_norm"]], so[["obs_norm"]]$target_id=="ZK185.9")$est_counts))
+#mean_obs from sleuth transcript table results
+filter(sleuth_table_txn, target_id=="ZK185.9")$mean_obs
+#sleuth_matrix results should agree
+sleuth_matrix <- sleuth_to_matrix(so, 'obs_norm', 'est_counts')
+sleuth_matrix.raw <- sleuth_to_matrix(so, 'obs_raw', 'est_counts')
+sleuth_matrix.tpm <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
+sleuth_matrix[59889,]
+log2(mean(sleuth_matrix[59889,]))
+log2(mean(sleuth_matrix.raw[59889,]))
+sleuth_matrix.tpm[59889,]
+
+```
+
+
+### Exploratory Data Analysis with *kallisto/sleuth*
+
+```{r EDA_sleuth}
+
+#Here, we check PCA plots based on kallisto counts
+#NOTE: all PCA plots below are done with the transcript counts as sleuth_to_matrix won't return gene-summarised counts
+#first, using sleuth's own plot_pca (this, it seems, uses transcript counts after all)
+#In addition, note that est_counts in sleuth are not log2 normalised
+#see: https://hbctraining.github.io/DGE_workshop_salmon/lessons/09_sleuth.html
+
+plot_pca(so,
+            color_by = 'condition',
+            text_labels = TRUE)
+
+#and then using the PCAtools package
+#need first the counts table (which_units would be scaled_reads_per_base for genes but it doesn't work for aggregation of pvalues (probably only for the old gene_mode=true))
+#sleuth_matrix <- sleuth_to_matrix(so, 'obs_norm', 'scaled_reads_per_base')
+sleuth_matrix <- sleuth_to_matrix(so, 'obs_norm', 'est_counts')
+dim(sleuth_matrix) #clearly this is counts of transcripts, not genes
+
+#alternative (this is how plot_pca in sleuth gets the matrix) - THIS WON'T WORK because sleuth.R does
+#not make the spread_abundance_by function available...
+#mat <- spread_abundance_by(so$obs_norm_filt, 'est_counts', 
+#            so$sample_to_covariates$sample)
+
+#will remove using removeVar a % of variables with low variance: we want to keep about 500 transcripts and we have about 60,000 so we will remove 99% of all variables
+p<- pca(sleuth_matrix, metadata=coldata, removeVar=0.99)
+dim(p$loadings) #should give about 600 transcripts
+
+#this is essentially the same PCA as by doing: prcomp(t(sleuth_matrix)), scale=FALSE, center=TRUE)
+
+screeplot(p)
+
+#the PCA plot is virtually identical to the one drawn by sleuth's plot_pca()
+biplot(p, colby="condition", labSize=4.0, widthConnectors=0.2, xlim=c(-25000, 20000), title="Kallisto est_counts")
+
+pairsplot(p, colby= "condition")
+
+plotloadings(p)
+#get the top 20 for PC1 and PC2
+rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20]
+#or getting all the info about these transcripts
+t2g[t2g$target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20],]
+
+rownames(p$loadings)[order(abs(p$loadings[,2]))][1:20]
+t2g[t2g$target_id %in% rownames(p$loadings)[order(abs(p$loadings[,2]))][1:20],]
+
+#NOTE: the est_counts are not logged in the PCA so we expect the largest counts to dominate as they have more variance in RNA-seq data
+quantile(sleuth_table_txn$mean_obs, na.rm=TRUE)
+quantile(sleuth_table_txn$var_obs, na.rm=TRUE)
+filter(sleuth_table_txn, target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20])  #counts here are log2 counts
+filter(so[["obs_norm"]], target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20])
+
+#Repeat wiith kallisto TPMs
+#note that there is only partial correlation between estimated counts and TPMs (TPMs take into account the gene length; est_counts seem to be normalised by sleuth when obs_norm is used)
+sleuth_matrix.tpm <- sleuth_to_matrix(so, 'obs_norm', 'tpm')
+dim(sleuth_matrix.tpm) #clearly this is counts of transcripts, not genes
+cor(sleuth_matrix.tpm[,1], sleuth_matrix[,1])
+
+#will remove using removeVar a % of variables with low variance: we want to keep about 500 transcripts and we have about 60,000 so we will remove 99% of all variables
+p.tpm<- pca(sleuth_matrix.tpm, metadata=coldata, removeVar=0.99)
+dim(p.tpm$loadings) #should give about 600 transcripts
+
+#this is essentially the same PCA as by doing: prcomp(t(sleuth_matrix)), scale=FALSE, center=TRUE)
+
+screeplot(p.tpm)
+
+#FIGURE: PCA_tpm_counts
+#the PCA plot is virtually identical to the one drawn by sleuth's plot_pca()
+biplot(p.tpm, colby="condition", labSize=4.0, widthConnectors=0.2, title="Kallisto TPM; top 1% varied transcripts")
+
+pairsplot(p.tpm, colby= "condition")
+
+#this command seems to hang for tpm values so  I'm not running it
+#plotloadings(p)
+#instead we can plot the top 20 for PC1 and PC2
+rownames(p.tpm$loadings)[order(abs(p$loadings[,1]))][1:20]
+t2g[t2g$target_id %in% rownames(p.tpm$loadings)[order(abs(p.tpm$loadings[,1]))][1:20],]
+rownames(p.tpm$loadings)[order(abs(p.tpm$loadings[,2]))][1:20]
+t2g[t2g$target_id %in% rownames(p.tpm$loadings)[order(abs(p.tpm$loadings[,2]))][1:20],]
+
+quantile(sleuth_table_txn$mean_obs, na.rm=TRUE)
+quantile(sleuth_table_txn$var_obs, na.rm=TRUE)
+filter(sleuth_table_txn, target_id %in% rownames(p.tpm$loadings)[order(abs(p.tpm$loadings[,1]))][1:20])
+
+#repeating the plot without removing any transcripts makes no real difference
+p.tpm0<- pca(sleuth_matrix.tpm, metadata=coldata, removeVar=0)
+dim(p.tpm0$loadings) #should give about 600 transcripts
+biplot(p.tpm0, colby="condition", labSize=4.0, widthConnectors=0.2, title="Kallisto TPM; all transcripts included")
+
+## WHAT HAPPENS IF WE LOG THE VALUES FOR est_counts? 
+#finally, repeat the PCA but this time using log2-transformed values for the est_counts
+p<- pca(log2(sleuth_matrix+0.5), metadata=coldata, removeVar=0.99)
+dim(p$loadings) #should give about 600 transcripts
+
+#this is essentially the same PCA as by doing: prcomp(t(sleuth_matrix)), scale=FALSE, center=TRUE)
+
+screeplot(p)
+
+#in this case the PC2 separates the samples
+biplot(p, colby="condition", labSize=4.0, widthConnectors=0.2, title="Kallisto log2(est_counts)")
+
+pairsplot(p, colby= "condition")
+
+plotloadings(p)
+#get the top 20 for PC1 and PC2
+rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20]
+#or getting all the info about these transcripts
+t2g[t2g$target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20],]
+
+rownames(p$loadings)[order(abs(p$loadings[,2]))][1:20]
+t2g[t2g$target_id %in% rownames(p$loadings)[order(abs(p$loadings[,2]))][1:20],]
+
+
+#NOTE: when log2 is used with est_counts, it will be the lower counts that dominate the PCA as they will have the larger variance due to Poisson noise
+quantile(sleuth_table_txn$mean_obs, na.rm=TRUE)
+quantile(sleuth_table_txn$var_obs, na.rm=TRUE)
+filter(sleuth_table_txn, target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20])
+#the distribution of est_counts (not logged) for the important loadings in PC1
+quantile(filter(so[["obs_norm"]], target_id %in% rownames(p$loadings)[order(abs(p$loadings[,1]))][1:20])$est_counts)
+#the distribution of est_counts (not_logged) across all transcripts
+quantile(so[["obs_norm"]]$est_counts)
+
+
 #Some additional exploratory analysis using sleuth's own functions
 plot_pca(so,
          color_by = 'condition',
          text_labels = TRUE)
-#note that using tpm as unit does not result in a great separation along the PC1 
 #the two types of samples are separated but only just (the SGs cluster together though)
 plot_pca(so,
           color_by = 'condition',
@@ -948,79 +1216,15 @@ plot_transcript_heatmap(so,
 so$obs_raw[so$obs_norm$target_id == "ZK287.8b.1",]
 
 
-#volcano plot for genes
-#Note: there is a problem with volcano and MA plots not setting hte p-value aggregate to FALSE when reading
-#results from the WT test and thus not realising there is a b column
-#Error reported is: 
-#Error in FUN(X[[i]], ...) : object 'b' not found
-#To fix this, manually set the pval_aggregate in so before supplying to plots as suggested here:
-#https://github.com/pachterlab/sleuth/issues/233
-# so$pval_aggregate <- FALSE
-# plot_volcano(obj=so, 
-        # test = "conditionneurexin", 
-        # test_type = "wt", 
-        # which_model="full", 
-        # sig_level = 0.05, 
-        # sig_color = "red")
-#can also do MA plot
-# plot_ma(obj=so, 
-        # test = "conditionneurexin", 
-        # test_type = "wt", 
-        # which_model="full", 
-        # sig_level = 0.05, 
-        # sig_color = "red")
-# ALTERNATIVELY
-#use the EnhancedVolcano package and function to make nicer plots and to also highlight 
-#genes easily (the highlight function in plot_volcano from sleuth is not working for me)
-
-#not used as using cutoffs within the volcano plot options
-#select.lab <- head(sleuth_significant_txn, 20)$target_id
-
-#use the same function that plot_volcano() uses to produce the data frame needed to make the plot
-toptable <- sleuth_results(so, 
-                           test="conditionneurexin", 
-                           test_type="wt", 
-                           which_model="full",
-                           pval_aggregate=FALSE,
-                           rename_cols=FALSE,
-                           show_all=FALSE)
-toptable <- dplyr::mutate(toptable, significant = qval < 0.05)
-dim(dplyr::filter(toptable, abs(b)>1))
-#there are 2045 transcripts
-
-EnhancedVolcano(
-     toptable=toptable,
-     lab=toptable$target_id,
-     x='b',
-     y='qval',
-     xlab="beta_value",
-     selectLab = NULL,
-     title="Sleuth results (without p-value aggregation)",
-     subtitle="",
-     legend=c("NS","beta","P","P & beta"),
-     legendLabels=c("NS","beta","P","P & beta"),
-     transcriptLabSize=5.0,
-     pLabellingCutoff=10e-6,
-     FCcutoff=1.0
-     )
-
-#create a table with information about top 10 most significant genes
-select.res <- dplyr::filter(toptable, abs(b)>1)[1:10,c(1,2,5,6,7)]
-dplyr::filter(t2g, target_id %in% select.res$target_id)
-merge(x=select.res, y=dplyr::filter(t2g, target_id %in% select.res$target_id), by="target_id", sort=FALSE, no.dups=TRUE)[,c("target_id","ext_gene","entrezgene_id.x","qval","description")]
-
-#Examine some bootstrapped counts for individual transcripts of the same gene
-plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[1], units = "est_counts", color_by = "condition")
-plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[2], units = "est_counts", color_by = "condition")
-plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[3], units = "est_counts", color_by = "condition")
-plot_bootstrap(so, target_id=(dplyr::filter(t2g, ens_gene=="WBGene00019606"))$target_id[4], units = "est_counts", color_by = "condition")
-
-#use the shiny app when not knitting the document
-#sleuth_live(so)
 ```
+
+**A note on the variability of PCA plots**
+We have plotted a number of PCA plots in the code above. Most look similar but there are also some striking differences. What drives most of the differences is that some of the plots have used log-transformed values of counts and others haven't.
+The est_counts in the so object's obs_norm and obs_raw data frames are not log normalised (however when they are shown in the results table, the mean observations are indeed logged (in this case transformed by log2 as this is how we built the object)). Hence, when we are using est_counts extracted with sleuth_to_matrix, these counts are not in a log scale. Some are indeed very large and will dominate the PCA plot (they also have very large variance in RNA-seq). If we log these values, then the lower counts will dominate the PCA as they will have the larger variance due to Poisson noise.
 
 ## Session information
 ```{r session_info}
+date()
 sessionInfo()
 #save.image(file="neurexin_analysis.Rdata")
 ```
