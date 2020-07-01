@@ -821,12 +821,18 @@ so <- sleuth_wt(so, which_beta='conditionneurexin', which_model='full')
 sleuth_table_wt <- sleuth_results(so, 
                                   test= 'conditionneurexin', 
                                   test_type =  'wt',
-                                  which_model = 'full')
+                                  which_model = 'full',
+                                  show_all = TRUE)
 dim(sleuth_table_wt)
+#how many of these genes have no NAs in q-value? (these are the ones that get filtered when show_all is FALSE)
+dim(filter(sleuth_table_wt, !is.na(qval)))
+
 sleuth_table_wt[1:5,]
 sleuth_significant_wt <- dplyr::filter(sleuth_table_wt, qval <= 0.05)
+#significant genes: 2328
 dim(sleuth_significant_wt)
 head(sleuth_significant_wt, 20)
+
 
 #and then a LRT test
 so <- sleuth_fit(so, ~1, 'null')
@@ -877,33 +883,75 @@ sleuth_table_txn <- sleuth_results(so,
                                    which_model = 'full',
                                    show_all = TRUE,
                                    pval_aggregate = FALSE)
+
+dim(sleuth_table_txn)
+#how many of these genes have no NAs in q-value? (these are the ones that get filtered when show_all is FALSE) - 15845
+dim(filter(sleuth_table_txn, !is.na(qval)))
+
 sleuth_table_txn[1:5,]
 sleuth_significant_txn <- dplyr::filter(sleuth_table_txn, qval <= 0.05)
-dim(sleuth_significant_txn)
+dim(sleuth_significant_txn) # 2263 transcripts are significant
+
 head(sleuth_significant_txn, 20)
-write.table(sleuth_significant_txn$target_id, file="results/sleuth_significant_TXN_q005.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")
+write.table(sleuth_significant_txn$target_id, file="results/sleuth_significant_TXN_q005.txt", quote=FALSE, row.names = FALSE, col.names = "#target_id")  #2263 transcripts written
 
 #the transcript table contains beta values too so one can talk about up and down regulated transcripts and genes
-sleuth_significant_txn.up <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b>0))
+sleuth_significant_txn.up <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b>0))  # 905 are upregulated
 head(sleuth_significant_txn.up, 20)
+#how many genes are upregulated? - 889
+length(unique(sleuth_significant_txn.up$ens_gene))
 #we will save the gene ids instead of transcript ones
 write.table(unique(sleuth_significant_txn.up$ens_gene), file="results/sleuth_significant_q005_up.txt", quote=FALSE, row.names = FALSE, col.names = "#ens_gene")
-sleuth_significant_txn.down <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b<0))
+sleuth_significant_txn.down <- dplyr::filter(sleuth_table_txn, (qval <= 0.05) & (b<0)) # 1358 are downregulated
 head(sleuth_significant_txn.down, 20)
+#how many genes are downpregulated? - 1334
+length(unique(sleuth_significant_txn.down$ens_gene))
 write.table(unique(sleuth_significant_txn.down$ens_gene), file="results/sleuth_significant_q005_down.txt", quote=FALSE, row.names = FALSE, col.names = "#ens_gene")
 
-#Summarise some of the numbers
-#all transcripts and genes considered in the analysis
+######## SUMMARY OF NUMBERS  ##########
+#all transcripts and genes included initially in the analysis: 61428 transcripts; 46904 genes
 length(sleuth_table_txn$target_id)
 length(sleuth_table_wt$target_id)
-length(unique(sleuth_table_wt$target_id))
-#transcripts and genes with sleuth data
+
+#note that numbers of genes in the transcript table and number of genes in the gene table are not exactly equal
+#there are 46881 genes in the transcript table
+length(unique(sleuth_table_txn$ens_gene))
+#and 46904 genes in the gene table
+table(sleuth_table_wt$target_id %!in% unique(sleuth_table_txn$ens_gene))
+#which genes are missing?
+extras <- sleuth_table_wt$target_id[sleuth_table_wt$target_id %!in% unique(sleuth_table_txn$ens_gene)]
+#why? they are entries with NAs (mostly rrns) so would have been filtered anyway             
+filter(sleuth_table_wt, sleuth_table_wt$target_id %in%  extras)
+                           
+#number of transcripts (15845) and genes (11337) with sleuth data in the gene p-value aggregation table i.e. filtered genes and transcripts
 sum(sleuth_table_wt$num_aggregated_transcripts, na.rm=TRUE )
 length(sleuth_table_wt[!is.na(sleuth_table_wt$num_aggregated_transcripts),] $target_id)
-#significantly DE genes (aggregated) at q<0.05
+
+#significantly DE genes (aggregated) in the gene results table at q<0.05 - 2328 genes
 length(sleuth_significant_wt$target_id)
-#significantly DE transcripts
-length(sleuth_significant_txn$target_id)
+#significantly DE transcripts in the transcript results table - 2263
+length(sleuth_significant_txn$target_id) 
+#how many genes correspond to these 2263 transcripts? - 2217
+length(unique(sleuth_significant_txn$ens_gene))
+
+########### PROBLEM???
+#Need to check this with Pachter's blogs and guidelines 
+#which genes are not in the transcript table but are in the gene table as differentially expressed?
+#genes in common:
+length(intersect(unique(sleuth_significant_txn$ens_gene), sleuth_significant_wt$target_id)) # answer is 2107
+#genes unique to the transcript table:
+length(setdiff(unique(sleuth_significant_txn$ens_gene), sleuth_significant_wt$target_id)) #answer is 110
+#genes unique to the gene table:
+length(setdiff(sleuth_significant_wt$target_id, unique(sleuth_significant_txn$ens_gene))) #answer is 221
+
+
+###################
+
+#significantly DE transcripts with large fold changes (abs(b)>1) - 480 transcripts
+dim(filter(sleuth_significant_txn, abs(b) > 1))
+#how many genes correspond to these? - 469 genes
+length(filter(sleuth_significant_txn, abs(b) > 1)$ens_gene)
+length(unique(filter(sleuth_significant_txn, abs(b) > 1)$ens_gene))
 
 
 #volcano plot for genes
@@ -935,6 +983,7 @@ length(sleuth_significant_txn$target_id)
 #select.lab <- head(sleuth_significant_txn, 20)$target_id
 
 #use the same function that plot_volcano() uses to produce the data frame needed to make the plot
+#we could use also the results table from before and remove the NAs but this is cleaner
 toptable <- sleuth_results(so, 
                            test="conditionneurexin", 
                            test_type="wt", 
@@ -942,9 +991,11 @@ toptable <- sleuth_results(so,
                            pval_aggregate=FALSE,
                            rename_cols=FALSE,
                            show_all=FALSE)
+dim(toptable) #should be the "filtered" transcripts, i.e. 15845
+#add a column that the volcano plot is using later
 toptable <- dplyr::mutate(toptable, significant = qval < 0.05)
-dim(dplyr::filter(toptable, abs(b)>1))
-#there are 2045 transcripts
+dim(dplyr::filter(toptable, abs(b)>1 & (significant == TRUE))) #this should be 480 transcripts, as before
+
 
 EnhancedVolcano(
      toptable=toptable,
