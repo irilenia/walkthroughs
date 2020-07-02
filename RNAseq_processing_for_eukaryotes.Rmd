@@ -25,6 +25,11 @@ library(topGO)
 library(Rgraphviz)
 library(EnhancedVolcano)
 library(pheatmap)
+library(clusterProfiler)
+library(svglite)
+library(ggplot2)
+library(enrichplot)
+library(ggupset)
 
 options(stringsAsFactors = FALSE)
 
@@ -935,16 +940,21 @@ length(sleuth_significant_txn$target_id)
 length(unique(sleuth_significant_txn$ens_gene))
 
 ########### PROBLEM???
-#Need to check this with Pachter's blogs and guidelines 
-#which genes are not in the transcript table but are in the gene table as differentially expressed?
+#Need to check this with Pachter's blogs and guidelines as the transcript and gene results are supposed
+#to be fully compatible (but I think it's fine because the top DE genes and genes corresponding to top DE
+#transcripts seem to agree..it's marginal cases that seem to be the problem)
 #genes in common:
 length(intersect(unique(sleuth_significant_txn$ens_gene), sleuth_significant_wt$target_id)) # answer is 2107
+#which genes are not in the transcript table but are in the gene table as differentially expressed?
 #genes unique to the transcript table:
 length(setdiff(unique(sleuth_significant_txn$ens_gene), sleuth_significant_wt$target_id)) #answer is 110
 #genes unique to the gene table:
 length(setdiff(sleuth_significant_wt$target_id, unique(sleuth_significant_txn$ens_gene))) #answer is 221
 
-
+#compare the very top results - they are identical up to top 50 and start having more differences as they build up...
+length(intersect(sleuth_significant_wt$ext_gene[1:50], unique(sleuth_significant_txn$ext_gene)[1:50]))
+length(intersect(sleuth_significant_wt$ext_gene[1:100], unique(sleuth_significant_txn$ext_gene)[1:100]))
+length(intersect(sleuth_significant_wt$ext_gene[1:500], unique(sleuth_significant_txn$ext_gene)[1:500]))
 ###################
 
 #significantly DE transcripts with large fold changes (abs(b)>1) - 480 transcripts
@@ -1272,6 +1282,215 @@ so$obs_raw[so$obs_norm$target_id == "ZK287.8b.1",]
 **A note on the variability of PCA plots**
 We have plotted a number of PCA plots in the code above. Most look similar but there are also some striking differences. What drives most of the differences is that some of the plots have used log-transformed values of counts and others haven't.
 The est_counts in the so object's obs_norm and obs_raw data frames are not log normalised (however when they are shown in the results table, the mean observations are indeed logged (in this case transformed by log2 as this is how we built the object)). Hence, when we are using est_counts extracted with sleuth_to_matrix, these counts are not in a log scale. Some are indeed very large and will dominate the PCA plot (they also have very large variance in RNA-seq). If we log these values, then the lower counts will dominate the PCA as they will have the larger variance due to Poisson noise.
+
+
+## Functional analysis
+
+Now that we have a list of significant differentially expressed genes (DGEs), we can  try to gain biological insight by visualising our results in a proper context. We will use mainly the library `clusterProfiler` for this, which has a variety of options for viewing the over-represented Gene Ontology (GO) terms. The layout of this part of the code is largely based on the tutorial found [here](https://hbctraining.github.io/DGE_workshop_salmon/lessons/functional_analysis_2019.html).
+
+### Quick pathway enrichment analysis using goseq
+Below we apply goseq to find overrepresented GO categories among differentially expressed genes.
+We will use the genes from the aggregated p-value sleuth run.
+
+```{r pathway enrichment analysis with goseq}
+#collect the results of differential expression
+#first the background list of genes (this will all be filtered genes in the analysis i.e. genes with no NAs in their qvalues)
+bg <- dplyr::filter(sleuth_table_wt, !is.na(qval))$ext_gene  #there should be 11337 genes in the background
+
+#then select significant genes with qval <= 0.05
+sig.q005 <- (dplyr::filter(sleuth_table_wt, qval <= 0.05))$ext_gene  #2328 genes
+
+t.q005.vector <- as.integer(bg %in% sig.q005)  #vector that specifies which genes are in the DE set and which not (length 11337)
+names(t.q005.vector) <- dplyr::filter(sleuth_table_wt, !is.na(qval))$ext_gene
+#sanity check
+table(t.q005.vector)
+
+#calculate the object containing the gene names, DE calls and probability weighting function.
+pwf.q005=nullp(t.q005.vector,"ce6","geneSymbol")
+
+subset(pwf.q005, !is.na(pwf.q005$pwf)) -> pwf.q005.noNA
+q005.GO.wall.BP=goseq(pwf.q005.noNA,"ce6","geneSymbol", test.cats = c("GO:BP"))  
+#q005.GO.wall.BP[(p.adjust(q005.GO.wall.BP$over_represented_pvalue,method="BH")<.05),c(2,3,6)]
+
+q005.GO.wall.MF=goseq(pwf.q005,"ce6","geneSymbol", test.cats = c("GO:MF"))
+#q005.GO.wall.MF[(p.adjust(q005.GO.wall.MF$over_represented_pvalue,method="BH")<.05),c(2,3,6)]
+
+q005.GO.wall.CC=goseq(pwf.q005,"ce6","geneSymbol", test.cats = c("GO:CC"))
+#q005.GO.wall.CC[(p.adjust(q005.GO.wall.CC$over_represented_pvalue,method="BH")<.05),c(2,3,6)]
+
+
+#filter for FDR<0.05 and min/max number of genes in each category
+q005.GO.wall.BP.filtered <- q005.GO.wall.BP
+q005.GO.wall.BP.filtered$adjp <- p.adjust(q005.GO.wall.BP$over_represented_pvalue,method="BH")
+q005.GO.wall.BP.filtered <- dplyr::filter(q005.GO.wall.BP.filtered, adjp < 0.05)
+q005.GO.wall.BP.filtered <- dplyr::filter(q005.GO.wall.BP.filtered, (numInCat < 500) & (numInCat>5)) 
+q005.GO.wall.BP.filtered
+
+q005.GO.wall.MF.filtered <- q005.GO.wall.MF
+q005.GO.wall.MF.filtered$adjp <- p.adjust(q005.GO.wall.MF$over_represented_pvalue,method="BH")
+q005.GO.wall.MF.filtered <- dplyr::filter(q005.GO.wall.MF.filtered, adjp < 0.05)
+q005.GO.wall.MF.filtered <- dplyr::filter(q005.GO.wall.MF.filtered, (numInCat <500) & (numInCat>5)) 
+q005.GO.wall.MF.filtered
+
+q005.GO.wall.CC.filtered <- q005.GO.wall.CC
+q005.GO.wall.CC.filtered$adjp <- p.adjust(q005.GO.wall.CC$over_represented_pvalue,method="BH")
+q005.GO.wall.CC.filtered <- dplyr::filter(q005.GO.wall.CC.filtered, adjp < 0.05)
+q005.GO.wall.CC.filtered <- dplyr::filter(q005.GO.wall.CC.filtered, (numInCat < 500) & (numInCat>5)) 
+q005.GO.wall.CC.filtered
+
+```
+
+
+```{r GO enrichment with clusterProfiler}
+# Run GO enrichment analysis and save results 
+ego <- enrichGO(gene = sleuth_significant_wt$target_id, 
+                universe = dplyr::filter(sleuth_table_wt, !is.na(qval))$target_id,
+                keyType = "ENSEMBL",
+                OrgDb = org.Ce.eg.db, 
+                ont = "ALL",
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+
+cluster_summary <- data.frame(ego)
+write.csv(cluster_summary, "results/clusterProfiler_ALL_neurexin.csv")
+
+ego <- enrichGO(gene = sleuth_significant_wt$target_id, 
+                universe = dplyr::filter(sleuth_table_wt, !is.na(qval))$target_id,
+                keyType = "ENSEMBL",
+                OrgDb = org.Ce.eg.db, 
+                ont = "BP",
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+
+cluster_summary <- data.frame(ego)
+write.csv(cluster_summary, "results/clusterProfiler_BP_neurexin.csv")
+
+#enrichment dotplot
+enrichment_dotplot <- clusterProfiler::dotplot(ego, 
+                                               x="GeneRatio",
+                                               showCategory = 30)
+plot(enrichment_dotplot)
+ggsave("results/enrichment_dotplot.svg", plot = enrichment_dotplot, path = ".",
+       width = 30, height = 15, units = "cm")
+
+
+#enrichment mapplot
+#this plot visualises gene sets as a network 
+#(mutually overlapping gene sets tend to cluster together)
+clusterProfiler::emapplot(ego,
+                          showCategory = 30)
+
+
+```
+
+An additional plot that ClusterProfiler allows us to do is a category netplot. These plots 
+are particularly useful for hypothesis generation in identifying genes 
+that may be important to several of the most affected processes. 
+These plots use fold change but this is not available in gene-level analysis in sleuth. 
+So instead, we'll use transcript-based results and use beta values as the fold changes.
+
+
+```{r netplot with transcript fold changes}
+#netplot
+# We need to rerun enrichGO with the transcript-based information instead
+# This is any way more correct as bias corrections based on length are best done using
+# the individual transcript info rather than some mean length for the gene
+# first, create a df without duplicate genes (first row is kept and so most important transcript should be kept in the df)
+df <- sleuth_significant_txn %>% distinct(ens_gene, .keep_all=TRUE) 
+# check it worked
+dim(df)
+length(unique(sleuth_significant_txn$ens_gene)) == dim(df)[1]
+
+# now re-run enrichGO using these genes instead 
+
+ego.txn <- enrichGO(gene = df$ens_gene, 
+                universe = unique(dplyr::filter(sleuth_table_txn, !is.na(qval))$ens_gene),
+                keyType = "ENSEMBL",
+                OrgDb = org.Ce.eg.db, 
+                ont = "BP",
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+
+#repeat quickly the dotplot and emapplot to compare them to the ones produced from the gene table
+#they should be very similar
+enrichment_dotplot <- clusterProfiler::dotplot(ego.txn, 
+                                               x="GeneRatio",
+                                               showCategory = 30)
+plot(enrichment_dotplot)
+ggsave("results/enrichment_dotplot.svg", plot = enrichment_dotplot, path = ".",
+       width = 30, height = 15, units = "cm")
+
+#fig_emapplot
+enrichment_mapplot <- clusterProfiler::emapplot(ego.txn,
+                                                showCategory = 30)
+plot(enrichment_mapplot)
+ggsave("results/enrichment_mapplot.svg", plot = enrichment_mapplot, path = ".")
+
+
+# A named character vector is needed to colour genes in the net plot
+genes_foldchange <- df$b
+names(genes_foldchange) <- df$ext_gene
+
+# Netplot
+
+enrichment_netplot <- cnetplot(ego.txn,
+                               categorySize = "pvalue",
+                               showCategory = 5,
+                               foldChange = genes_foldchange,
+                               vertex.label.font = 6, drop=TRUE)
+plot(enrichment_netplot)
+ggsave("results/enrichment_netplot.svg", plot = enrichment_netplot, path = ".",
+       width = 40, height = 40, units = "cm")
+
+#remove the gene names for clarity (showing more categories doesn't help much as they fall on top of each other)
+enrichment_netplot <- cnetplot(ego.txn,
+          categorySize = "pvalue",
+          showCategory = 5,
+          foldChange = genes_foldchange,
+          vertex.label.font = 6, node_label="category")
+plot(enrichment_netplot)
+ggsave("results/enrichment_netplot_cleaner.svg", plot = enrichment_netplot, path = ".",
+       width = 40, height = 40, units = "cm")
+
+#showing 8 categories
+cnetplot(ego.txn,
+          categorySize = "pvalue",
+          showCategory = 8,
+          foldChange = genes_foldchange,
+          vertex.label.font = 6, node_label="category")
+
+#relationship between the GO terms identified (haven't found a way to make the writing bigger!)
+go_graph <- plotGOgraph(ego.txn)
+
+#goplot (relationships between GO categories)
+goplot(ego.txn)
+
+#upsetplot (requires enrichplot and ggupset) - number of genes overlapping different data sets
+upsetplot(ego.txn)
+
+#Repeat using ALL categories - molecular function gives no results (when run on its
+#own gives a few non-significant hits)
+ego.txn <- enrichGO(gene = df$ens_gene, 
+                universe = unique(dplyr::filter(sleuth_table_txn, !is.na(qval))$ens_gene),
+                keyType = "ENSEMBL",
+                OrgDb = org.Ce.eg.db, 
+                ont = "ALL",
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+
+enrichment_dotplot <- clusterProfiler::dotplot(ego.txn, 
+                                               x="GeneRatio",
+                                               showCategory = 30)
+plot(enrichment_dotplot)
+ggsave("results/enrichment_dotplot_ALL.svg", plot = enrichment_dotplot, path = ".",
+       width = 30, height = 15, units = "cm")
+
+
+```
 
 ## Session information
 ```{r session_info}
