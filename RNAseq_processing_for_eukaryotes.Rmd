@@ -30,6 +30,8 @@ library(svglite)
 library(ggplot2)
 library(enrichplot)
 library(ggupset)
+library(cowplot)
+library(pathview)
 
 options(stringsAsFactors = FALSE)
 
@@ -1288,7 +1290,7 @@ The est_counts in the so object's obs_norm and obs_raw data frames are not log n
 
 Now that we have a list of significant differentially expressed genes (DGEs), we can  try to gain biological insight by visualising our results in a proper context. We will use mainly the library `clusterProfiler` for this, which has a variety of options for viewing the over-represented Gene Ontology (GO) terms. The layout of this part of the code is largely based on the tutorial found [here](https://hbctraining.github.io/DGE_workshop_salmon/lessons/functional_analysis_2019.html).
 
-### Quick pathway enrichment analysis using goseq
+### Quick GO over-representation analysis using goseq
 Below we apply goseq to find overrepresented GO categories among differentially expressed genes.
 We will use the genes from the aggregated p-value sleuth run.
 
@@ -1341,6 +1343,10 @@ q005.GO.wall.CC.filtered
 ```
 
 
+### GO over-representation analysis with clusterProfiler (using gene-level sleuth results)
+Much of this code has been adapted from Diego's analysis.
+We apply the various clusterProfiler functions to explore the data.
+
 ```{r GO enrichment with clusterProfiler}
 # Run GO enrichment analysis and save results 
 ego <- enrichGO(gene = sleuth_significant_wt$target_id, 
@@ -1384,6 +1390,9 @@ clusterProfiler::emapplot(ego,
 
 
 ```
+
+
+### GO over-representation analysis with clusterProfiler (using transcript-level sleuth results)
 
 An additional plot that ClusterProfiler allows us to do is a category netplot. These plots 
 are particularly useful for hypothesis generation in identifying genes 
@@ -1471,7 +1480,60 @@ goplot(ego.txn)
 #upsetplot (requires enrichplot and ggupset) - number of genes overlapping different data sets
 upsetplot(ego.txn)
 
-#Repeat using ALL categories - molecular function gives no results (when run on its
+
+#As centplots are very crowded, we can focus on subsets of interest
+#First, focus on RNA terms
+ego.sub <- ego.txn
+descriptions <- ego.txn@result$Description
+go_term1 <- which(base::grepl("RNA", descriptions) == TRUE)
+#go_term2 <- which(base::grepl("splic", descriptions) == TRUE)
+
+#ego.sub@result <- ego.sub@result[c(go_term1, go_term2), ]
+ego.sub@result <- ego.sub@result[c(go_term1), ]
+
+# Plotting terms of interest
+enrichment_netplot.sub <- cnetplot(ego.sub,
+                                categorySize = "pvalue",
+                                foldChange = genes_foldchange,
+                                showCategory = 5)
+plot(enrichment_netplot.sub)
+ggsave("enrichment_netplot.sub.svg", plot = enrichment_netplot.sub, path = "./results",
+       width = 25, height = 20, units = "cm")
+
+#Next, focus on "catabolic" processes
+ego.sub <- ego.txn
+descriptions <- ego.txn@result$Description
+go_term1 <- which(base::grepl("catabolic", descriptions) == TRUE)
+
+ego.sub@result <- ego.sub@result[c(go_term1), ]
+
+enrichment_netplot.sub2 <- cnetplot(ego.sub,
+                                categorySize = "pvalue",
+                                foldChange = genes_foldchange,
+                                showCategory = 5)
+plot(enrichment_netplot.sub2)
+ggsave("enrichment_netplot.sub2.svg", plot = enrichment_netplot.sub2, path = "./results",
+       width = 25, height = 20, units = "cm")
+
+#Next, focus on chromosome
+ego.sub <- ego.txn
+descriptions <- ego.txn@result$Description
+go_term1 <- which(base::grepl("chromosom", descriptions) == TRUE)
+
+ego.sub@result <- ego.sub@result[c(go_term1), ]
+
+enrichment_netplot.sub3 <- cnetplot(ego.sub,
+                                categorySize = "pvalue",
+                                foldChange = genes_foldchange,
+                                showCategory = 5)
+plot(enrichment_netplot.sub3)
+ggsave("enrichment_netplot.sub3.svg", plot = enrichment_netplot.sub3, path = "./results",
+       width = 25, height = 20, units = "cm")
+
+#put all the plots together using cowplot
+cowplot::plot_grid(enrichment_netplot, enrichment_netplot.sub, enrichment_netplot.sub2, enrichment_netplot.sub3, ncol=2, labels=LETTERS[1:4])
+
+#Finally, repeat using ALL categories - molecular function gives no results (when run on its
 #own gives a few non-significant hits)
 ego.txn <- enrichGO(gene = df$ens_gene, 
                 universe = unique(dplyr::filter(sleuth_table_txn, !is.na(qval))$ens_gene),
@@ -1491,6 +1553,258 @@ ggsave("results/enrichment_dotplot_ALL.svg", plot = enrichment_dotplot, path = "
 
 
 ```
+
+### GSEA analysis with clusterProfiler (using transcript-level sleuth results)
+*Analysis adapted from the original done by Diego*
+
+GSEA methods suggest that weaker but coordinated changes in sets of functionally related genes (i.e., pathways) can also have significant effects and might not be picked up by analysis of lists of genes that have been selected using what is essentially a random p-value cutoff. Thus, rather than setting an arbitrary threshold to identify ‘significant genes’, **all genes are considered in the GSEA analysis**.
+
+To perform Gene Set Enrichment Analysis (GSEA) of KEGG gene sets, clusterProfiler requires the genes to be identified using Entrez IDs for all genes in our results dataset. We also need to remove the NA values and duplicates (due to gene ID conversion) prior to the analysis.
+
+See also this blog: https://learn.gencore.bio.nyu.edu/rna-seq-analysis/over-representation-analysis/
+
+** DO NOT RUN GSEA YET **
+```{r GSEA with clusterProfiler, eval=FALSE, echo=FALSE}
+# Remove any NA or duplicated values
+t<- dplyr::filter(sleuth_table_txn, (!is.na(qval)) & (!is.na(entrezgene_id)))
+dim(t)  #15382 results remaining
+#some gene ids will be duplicates as this was the transcripts table
+length(t$entrezgene_id)  #15382 lines remaining
+length(unique(t$entrezgene_id))  #10888 unique genes
+#filter out the duplicate entrez ids
+t<- t %>% distinct(entrezgene_id, .keep_all=TRUE) 
+dim(t) #should be 10888 lines left
+
+#the required input seems to be a vector, often pvalues or log fold changes(?), named by the gene Entrez ids
+#list needs to be named by the gene ids
+gene_list <- abs(t$pval)
+names(gene_list) <- t$entrezgene_id
+#and sorted in decreasing order
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# GSEA of KEGG
+gseaKEGG <- gseKEGG(gene_list,
+                    organism = "cel",
+                    keyType = "ncbi-geneid",
+                    pvalueCutoff = 0.05,
+                    verbose = FALSE)
+gseaKEGG_results <- gseaKEGG@result
+write.csv(gseaKEGG_results, "results/gsea_kegg.csv", quote = F)
+```
+
+### KEGG pathway enrichment with clusterProfiler
+```{r clusterprofiler_kegg}
+#check the kegg code for c.elegans
+search_kegg_organism('cel', by='kegg_code')
+#entrez ids not recognised in this case
+sigGenes <- sleuth_significant_txn %>% distinct(ext_gene, .keep_all=FALSE)
+sigGenes[,1] <- paste("CELE", sigGenes[,1],sep = "_")
+dim(sigGenes)
+universe <- sleuth_table_txn %>% filter(!is.na(ext_gene) & !is.na(qval)) %>% distinct(ext_gene, .keep_all=FALSE) 
+universe[,1] <- paste("CELE", universe[,1], sep="_")
+dim(universe)
+
+keg_res <- enrichKEGG(gene=sigGenes[,1], 
+                      organism="cel",
+                      keyType="kegg",
+                      universe= universe[,1],
+                      minGSSize = 2, #default is 10 
+                      qvalueCutoff = 0.1) 
+head(keg_res)
+#this does not appear to return any results, even if the minGSSize is set to 1 and the qvalue cutoff further relaxed.
+
+#however, setting the universe to all C. elegans genes in KEGG returns three
+#pathways
+keg_res <- enrichKEGG(gene=sigGenes[,1], 
+                      organism="cel",
+                      keyType="kegg",
+                      minGSSize = 2, #default is 10 
+                      qvalueCutoff = 0.1) 
+head(keg_res)
+
+```
+
+### Visualisation of KEGG pathways with pathview
+We can use the `pathview` function for visualising individual kegg pathways. The `pathview` function requires a numeric vector with gene IDs as names. It looks like the IDs it accepts in this case are Entrez ids? 
+The colours in the following plots indicate low (green) or high (red) beta values for any transcript included
+in the analysis (can be significant or  not).
+*Note: unlikely to be that useful here as KEGG enrichment returned no results; but equivalent with reactome
+or something else might be useful *
+
+```{r pathview, message=FALSE, fig.align="center"}
+
+#pathview can be used to show which genes are significantly differentially expressed or log fold changes 
+#can be added to the vector provided to give a range of colours on the plot
+
+
+#sigGenes <- sleuth_significant_txn %>% dplyr::distinct(ext_gene, .keep_all=TRUE) %>% dplyr::select(ext_gene, b)
+#keggGenes <- sigGenes$b
+#names(keggGenes) <- paste("CELE", sigGenes[,1], sep="_")
+
+#t <- sleuth_table_txn %>% filter(!is.na(ext_gene) & !is.na(qval)) %>% dplyr::distinct(entrezgene_id, .keep_all=TRUE) %>% dplyr::select(entrezgene_id, b)
+#keggGenes <- t$b
+#names(keggGenes) <- t$entrezgene_id
+
+t <- sleuth_table_txn %>% filter(!is.na(ext_gene) & !is.na(qval)) %>% dplyr::distinct(ext_gene, .keep_all=TRUE) %>% dplyr::select(ext_gene, b)
+keggGenes <- t$b
+names(keggGenes) <- paste("CELE", t$ext_gene, sep="_")
+
+#In the images below, I use a permissive 0.5 value for beta otherwise many
+#genes would come out as grey
+#NOTE: these can be misleading for various reasons: a) the differences
+#may not be significant (I'm not using the significant only genes)
+#b) I've only kept one isoform from each gene so maybe one isoform goes up but
+#øthers go down...
+
+# Output image for ribosome biogenesis KEGG pathway: "cel03008"
+pv.out <- pathview(gene.data = keggGenes,
+         pathway.id = "cel03008",
+         species = "cel",
+         gene.idtype = "kegg",  #default is entrez ids
+         #gene.idtype = "entrez",
+         #limit = list(gene = c(round(min(keggGenes)),
+          #                     round(max(keggGenes))),
+          #            cpd = 1),
+         limit = list(gene = c(-0.5,
+                               0.5),
+                      cpd = 1),
+         plot.col.key = TRUE,
+         kegg.native=T,
+         kegg.dir = "./results/")
+
+# Output image for spliceosome KEGG pathway: "cel03040"
+pv.out <- pathview(gene.data = keggGenes,
+         pathway.id = "cel03040",
+         species = "cel",
+         gene.idtype = "kegg",  #default is entrez ids
+         #gene.idtype = "entrez",
+         #limit = list(gene = c(round(min(keggGenes)),
+          #                     round(max(keggGenes))),
+          #            cpd = 1),
+         limit = list(gene = c(-0.5,
+                               0.5),
+                      cpd = 1),
+         plot.col.key = TRUE,
+         kegg.native=T,
+         kegg.dir = "./results/")
+
+
+# Output image for fatty acid elongation in mitochondria KEGG pathway: "cel00062"
+pv.out <- pathview(gene.data = keggGenes,
+         pathway.id = "cel00062",
+         species = "cel",
+         gene.idtype = "kegg",  #default is entrez ids
+         #gene.idtype = "entrez",
+         #limit = list(gene = c(round(min(keggGenes)),
+          #                     round(max(keggGenes))),
+          #            cpd = 1),
+         limit = list(gene = c(-0.5,
+                               0.5),
+                      cpd = 1),
+         plot.col.key = TRUE,
+         kegg.native=T,
+         kegg.dir = "./results/")
+
+# Output image for  TCA KEGG pathway: "cel00020"
+pv.out <- pathview(gene.data = keggGenes,
+         pathway.id = "cel00020",
+         species = "cel",
+         #gene.idtype = "entrez",
+         gene.idtype = "kegg",  #default is entrez ids
+         #limit = list(gene = c(round(min(keggGenes)),
+          #                     round(max(keggGenes))),
+           #           cpd = 1),
+         limit = list(gene = c(-0.5,
+                               0.5),
+                      cpd = 1),
+         kegg.native=T, 
+         kegg.dir = "./results/")
+
+# Output image for  lysosome KEGG pathway: "cel04142"
+pv.out <- pathview(gene.data = keggGenes,
+         pathway.id = "cel04142",
+         species = "cel",
+         #gene.idtype = "entrez",
+         gene.idtype = "kegg",  #default is entrez ids
+         #limit = list(gene = c(round(min(keggGenes)),
+          #                     round(max(keggGenes))),
+           #           cpd = 1),
+         limit = list(gene = c(-0.5,
+                               0.5),
+                      cpd = 1),
+         both.dirs=list(gene=TRUE, cpd=FALSE),
+         kegg.native=T, 
+         kegg.dir = "./results/")
+
+#tidy up (pathview prints out the annotated pathway pics in the current directory 
+#but puts the original ones in the kegg.dir)
+pathview_dir <- "results/pathview_kegg"
+ifelse(!dir.exists(file.path("./", pathview_dir)), dir.create(file.path("./", pathview_dir)), FALSE)
+files_to_move<- list.files("./", pattern="*.pathview.png")
+file.rename(files_to_move, paste(pathview_dir, files_to_move, sep="/"))
+pathview_dir <- "results/pathview_kegg"
+files_to_move <- list.files("./results", pattern="cel*[png|xml]", full.names=F)
+file.rename(paste("results/", files_to_move,sep="/"), paste(pathview_dir, files_to_move, sep="/"))
+
+```
+
+### Functional enrichment analysis with gProfiler (using transcript-level sleuth results)
+```{r gProfiler}
+#code follows: https://cran.r-project.org/web/packages/gprofiler2/vignettes/gprofiler2.html#gene-list-functional-enrichment-analysis-with-gost
+#Analysis with gProfiler can also be done online at: 
+#install.packages("gprofiler2")
+#install.packages("treemap")
+library(treemap)
+library(gprofiler2)
+
+#use genes rather than transcripts
+df <- sleuth_significant_txn %>% distinct(ens_gene, .keep_all=TRUE) 
+# check it worked
+dim(df)
+length(unique(sleuth_significant_txn$ens_gene)) == dim(df)[1]
+
+gostres <- gost(query = df$ext_gene, 
+                                  organism = "celegans",
+                                  ordered_query = F, 
+                                  exclude_iea = T,   #exclude computational GO annotations 
+                                  significant=TRUE, 
+                                  evcodes = TRUE, #evidence codes for the results
+                                  correction_method = "fdr", #tailor-made algorithm provided by gProfiler
+                                  custom_bg = dplyr::filter(sleuth_table_txn, !is.na(qval))$target_id)
+
+head(gostres$result)
+
+#interactive plot highlighting significant terms
+gostplot(gostres, 
+         capped = TRUE, # all pvalues less than 10e-16 will appear above this line together
+         interactive = TRUE)
+
+#create a table with results
+publish_gosttable(gostres, highlight_terms = gostres$result[c(1:10),],
+                   use_colors = TRUE, 
+                   show_columns = c("source", "term_name", "term_size", "intersection_size"),
+                   filename = NULL)
+
+gostres$result[,c("term_id", "p_value")]
+
+#save results for GO terms only so they can be uploaded to REVIGO
+t<- gostres$result[,c("term_id", "p_value")]
+write.table(t[grep("GO", t$term_id),], "results/gProfiler_GO.txt", quote=FALSE, row.names = FALSE, col.names = FALSE)
+
+#Then copy and pase the content of gProfiler_GO.txt into REVIGO at: http://revigo.irb.hr/revigo.jsp
+#and download the R script for plotting from that website. REVIGO reduces the GO terms by removng redundancy and making it easier to look at the results.
+#Can download the treemap script or the other R scripts from the individual tabs
+#NOTE: The treemap R script needs a small modification to avoid warnings (change tmPlot() to treemap())
+
+```
+
+Visualisation of gProfiler GO analysis with REVIGO plots: 
+
+![Alt text](results/revigo_treemap.pdf)
+
+![Alt text](results/revigo-plot.pdf)
+
+
 
 ## Session information
 ```{r session_info}
