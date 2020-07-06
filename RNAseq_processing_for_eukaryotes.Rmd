@@ -32,6 +32,7 @@ library(enrichplot)
 library(ggupset)
 library(cowplot)
 library(pathview)
+library(gage)
 
 options(stringsAsFactors = FALSE)
 
@@ -1628,8 +1629,12 @@ head(keg_res)
 We can use the `pathview` function for visualising individual kegg pathways. The `pathview` function requires a numeric vector with gene IDs as names. It looks like the IDs it accepts in this case are Entrez ids? 
 The colours in the following plots indicate low (green) or high (red) beta values for any transcript included
 in the analysis (can be significant or  not).
-*Note: unlikely to be that useful here as KEGG enrichment returned no results; but equivalent with reactome
-or something else might be useful *
+
+*Note: I used here all transcripts, not just DE ones; however the log fold change could be meaningless for insignificant genes, so perhaps a better approach is to select significant transcripts first and then order them by beta values*
+
+*Note: unlikely to be that useful here as KEGG enrichment returned no results; but equivalent with reactome or something else might be useful*
+
+*Analysis adapted from Diego's script*
 
 ```{r pathview, message=FALSE, fig.align="center"}
 
@@ -1748,6 +1753,16 @@ file.rename(paste("results/", files_to_move,sep="/"), paste(pathview_dir, files_
 
 ```
 
+![Alt text](results/pathview_kegg/cel00020.pathview.png)
+![Alt text](results/pathview_kegg/cel00062.pathview.png)
+
+![Alt text](results/pathview_kegg/cel03008.pathview.png)
+
+![Alt text](results/pathview_kegg/cel03040.pathview.png)
+
+![Alt text](results/pathview_kegg/cel04142.pathview.png)
+
+
 ### Functional enrichment analysis with gProfiler (using transcript-level sleuth results)
 ```{r gProfiler}
 #code follows: https://cran.r-project.org/web/packages/gprofiler2/vignettes/gprofiler2.html#gene-list-functional-enrichment-analysis-with-gost
@@ -1805,6 +1820,139 @@ Visualisation of gProfiler GO analysis with REVIGO plots:
 ![Alt text](results/revigo-plot.pdf)
 
 
+### Over-representation analysis with Panther
+This analysis was carried out online (but when I have time I'll implement it with the API)
+using the up- and down-regulated gene lists I created earlier using the significant transcript
+table from sleuth. As background, we used all genes from sleuth_table_wt with no NAs (11337
+genes), i.e.
+`dplyr::filter(sleuth_table_wt, !is.na(qval))$target_id`
+The results are in both json and csv formats but here we'll use the csv as the json
+files contain a lot more information than we need to make the summary figures below.
+Information about individual genes mapping to the gene sets though is held in the .json
+files only.
+
+```{r panther over-representation analysis}
+#we will use the GOslim annotations as the others contain a lot of redundant GO terms.
+#first look at upregulated gene set
+panther.bpslim <- read.csv(file="results/panther/panther_GOslim_BP_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+
+#we limit the selection of terms to those that are over-represented (under-represented ones will probably appear in the downregulated set of genes anyway)
+panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Biological.Process, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Biological.Process, log10FDR= sleuth_significant_q005_up.txt..FDR.)
+
+panther.bpslim$term <- "BP"
+
+panther.ccslim <- read.csv(file="results/panther/panther_GOslim_CC_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+panther.ccslim <- panther.ccslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Cellular.Component, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Cellular.Component, log10FDR= sleuth_significant_q005_up.txt..FDR.)
+
+panther.ccslim$term <- "CC"
+
+panther.mfslim <- read.csv(file="results/panther/panther_GOslim_MF_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+panther.mfslim <- panther.mfslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Molecular.Function, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Molecular.Function, log10FDR= sleuth_significant_q005_up.txt..FDR.)
+
+panther.mfslim$term <- "MF"
+
+bars <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
+bars$log10FDR <- -log10(bars$log10FDR)
+
+p <-ggplot(bars, aes(x=GO, y=log10FDR, fill=term))
+p +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in upregulated gene set")
+
+#now look at underregulated gene set
+panther.bpslim <- read.csv(file="results/panther/panther_GOslim_BP_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+
+#we limit the selection of terms to those that are over-represented (under-represented ones will probably appear in the downregulated set of genes anyway)
+panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Biological.Process, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Biological.Process, log10FDR= sleuth_significant_q005_down.txt..FDR.)
+
+panther.bpslim$term <- "BP"
+
+panther.ccslim <- read.csv(file="results/panther/panther_GOslim_CC_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+panther.ccslim <- panther.ccslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Cellular.Component, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Cellular.Component, log10FDR= sleuth_significant_q005_down.txt..FDR.)
+
+panther.ccslim$term <- "CC"
+
+panther.mfslim <- read.csv(file="results/panther/panther_GOslim_MF_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+panther.mfslim <- panther.mfslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Molecular.Function, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Molecular.Function, log10FDR= sleuth_significant_q005_down.txt..FDR.)
+
+panther.mfslim$term <- "MF"
+
+bars <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
+bars$log10FDR <- -log10(bars$log10FDR)
+
+dim(bars)
+#there are too many GO terms to display on the plot; will filter on -log10(FDR)
+bars <- bars %>% filter(log10FDR > 4)
+
+p <-ggplot(bars, aes(x=GO, y=log10FDR, fill=term))
+p +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in downregulated gene set")
+
+```
+
+## Analysis of isoform switching using isoformAnalyzer
+We now use the isoformAnalyzer package to examine the changes at transcript level that are picked up by kallisto's transcript isoform quantification pipeline.
+
+```{r isoformAnalyzer}
+#This is following the isoformAnalyzeR documentation
+#BiocManager::install("IsoformSwitchAnalyzeR")
+library(IsoformSwitchAnalyzeR)
+
+subDir="isoformAnalyzer"
+mainDir="results/isoformAnalyzer"
+if (!file.exists(mainDir)){
+    dir.create(file.path("./results", subDir))
+}
+
+
+#Import quantifications from kallisto
+kallistoQuant <- importIsoformExpression(parentDir = "kallisto_with_ncRNA_norRNA/")
+
+#check it worked
+kallistoQuant$abundance[1,]
+kallistoQuant$counts[1,]
+
+#create the design table
+myDesign <- data.frame(
+    sampleID = colnames(kallistoQuant$abundance)[-1],
+    condition = c("control", "control", "control", "control", 
+                  "neurexin", "neurexin", "neurexin", "neurexin")
+)
+myDesign
+
+#now build the list of isoforms 
+#isoformNtFasta is only available in the latest release - needed to update R to 3.6
+#isoSwitchList is equivalent of "aSwitchList" in documentation
+isoSwitchList <- importRdata(
+    isoformCountMatrix   = kallistoQuant$counts,
+    isoformRepExpression = kallistoQuant$abundance,
+    designMatrix         = myDesign,
+    isoformExonAnnoation = "genomes/Caenorhabditis_elegans.WBcel235.99.gtf.gz",
+    isoformNtFasta       = "genomes/Caenorhabditis_elegans.WBcel235.cdna_and_ncrna_norRNA.fa.gz",
+    showProgress = FALSE
+)
+
+#examples of the data held in isoSwitchList to show import worked
+head(isoSwitchList$isoformFeatures,2)
+head(isoSwitchList$exons,2)
+head(isoSwitchList$ntSequence,2)
+
+#filtering to remove genes with a single isoform (removes 19941 or 62.5% of all transcripts) and remove isoforms/genes with low expression (removes additionally 6108 transcripts so in the end 81.6% of transcripts are removed; 5867 isoforms left )
+isoSwitchListFiltered <- preFilter(
+    switchAnalyzeRlist = isoSwitchList,
+    geneExpressionCutoff = 5,
+    isoformExpressionCutoff = 2,
+    removeSingleIsoformGenes = TRUE
+)
+
+#testing for isoform switches using DEXSeq
+isoSwitchListAnalyzed <- isoformSwitchTestDEXSeq(
+    switchAnalyzeRlist = isoSwitchListFiltered,
+    reduceToSwitchingGenes=TRUE
+)
+
+#extract a summary - 32 isoforms found to switch (corresponding to 19 genes)
+extractSwitchSummary(isoSwitchListAnalyzed)
+
+
+```
 
 ## Session information
 ```{r session_info}
