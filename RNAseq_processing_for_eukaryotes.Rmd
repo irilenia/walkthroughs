@@ -1010,6 +1010,7 @@ toptable <- dplyr::mutate(toptable, significant = qval < 0.05)
 dim(dplyr::filter(toptable, abs(b)>1 & (significant == TRUE))) #this should be 480 transcripts, as before
 
 
+#FIGURE fig_volcano_txn
 EnhancedVolcano(
      toptable=toptable,
      lab=toptable$target_id,
@@ -1433,7 +1434,7 @@ plot(enrichment_dotplot)
 ggsave("results/enrichment_dotplot.svg", plot = enrichment_dotplot, path = ".",
        width = 30, height = 15, units = "cm")
 
-#fig_emapplot
+#FIGURE fig_emapplot
 enrichment_mapplot <- clusterProfiler::emapplot(ego.txn,
                                                 showCategory = 30)
 plot(enrichment_mapplot)
@@ -1833,8 +1834,15 @@ files only.
 
 ```{r panther over-representation analysis}
 #we will use the GOslim annotations as the others contain a lot of redundant GO terms.
-#first look at upregulated gene set
+# ########################################
+# first look at ***UPREGULATED*** gene set
+# ########################################
 panther.bpslim <- read.csv(file="results/panther/panther_GOslim_BP_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.bpslim)
+
+#filter out the very generic GO terms (put a filter at 200 genes for the background) and the very small term (filter at 10 genes for the background) 
+panther.bpslim <- panther.bpslim[!((panther.bpslim$bg_genes_all.txt...REFLIST..10765. > 200) | (panther.bpslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.bpslim)
 
 #we limit the selection of terms to those that are over-represented (under-represented ones will probably appear in the downregulated set of genes anyway)
 panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Biological.Process, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Biological.Process, log10FDR= sleuth_significant_q005_up.txt..FDR.)
@@ -1842,23 +1850,41 @@ panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_up.txt..over
 panther.bpslim$term <- "BP"
 
 panther.ccslim <- read.csv(file="results/panther/panther_GOslim_CC_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+#filter out the very generic GO terms (put a filter at 500 genes for the background) and the very small term (filter at 10 genes for the background) 
+#note the use of 500 instead of 200 genes here as upper max as cellular components generally contain a lot more genes
+panther.ccslim <- panther.ccslim[!((panther.ccslim$bg_genes_all.txt...REFLIST..10765. > 500) | (panther.ccslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.ccslim)
+
 panther.ccslim <- panther.ccslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Cellular.Component, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Cellular.Component, log10FDR= sleuth_significant_q005_up.txt..FDR.)
 
 panther.ccslim$term <- "CC"
 
 panther.mfslim <- read.csv(file="results/panther/panther_GOslim_MF_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+#filter out the very generic GO terms (put a filter at 200 genes for the background) and the very small term (filter at 10 genes for the background) 
+panther.mfslim <- panther.mfslim[!((panther.mfslim$bg_genes_all.txt...REFLIST..10765. > 200) | (panther.mfslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.mfslim)
+
 panther.mfslim <- panther.mfslim %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Molecular.Function, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Molecular.Function, log10FDR= sleuth_significant_q005_up.txt..FDR.)
 
 panther.mfslim$term <- "MF"
 
-bars <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
-bars$log10FDR <- -log10(bars$log10FDR)
+bars.up <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
+bars.up$log10FDR <- -log10(bars.up$log10FDR)
+bars.up$up_or_down <- "up"
+dim(bars.up)
 
-p <-ggplot(bars, aes(x=GO, y=log10FDR, fill=term))
-p +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in upregulated gene set")
+p.up <-ggplot(bars.up, aes(x=GO, y=log10FDR, fill=term))
+p.up <- p.up +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in upregulated gene set (fdr < 0.05)")
 
-#now look at underregulated gene set
+# ########################################
+#now look at ***DOWNREGULATED*** gene set
+# ########################################
 panther.bpslim <- read.csv(file="results/panther/panther_GOslim_BP_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.bpslim)
+
+#filter
+panther.bpslim <- panther.bpslim[!((panther.bpslim$bg_genes_all.txt...REFLIST..10765. >200) | (panther.bpslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.bpslim)
 
 #we limit the selection of terms to those that are over-represented (under-represented ones will probably appear in the downregulated set of genes anyway)
 panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Biological.Process, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Biological.Process, log10FDR= sleuth_significant_q005_down.txt..FDR.)
@@ -1866,24 +1892,151 @@ panther.bpslim <- panther.bpslim %>% filter(sleuth_significant_q005_down.txt..ov
 panther.bpslim$term <- "BP"
 
 panther.ccslim <- read.csv(file="results/panther/panther_GOslim_CC_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.ccslim)
+#filter
+panther.ccslim <- panther.ccslim[!((panther.ccslim$bg_genes_all.txt...REFLIST..10765. >500) | (panther.ccslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.ccslim)
+
 panther.ccslim <- panther.ccslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Cellular.Component, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Cellular.Component, log10FDR= sleuth_significant_q005_down.txt..FDR.)
 
 panther.ccslim$term <- "CC"
 
 panther.mfslim <- read.csv(file="results/panther/panther_GOslim_MF_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.mfslim)
+#filter
+panther.mfslim <- panther.mfslim[!((panther.mfslim$bg_genes_all.txt...REFLIST..10765. > 200) | (panther.mfslim$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.mfslim)
+
 panther.mfslim <- panther.mfslim %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(PANTHER.GO.Slim.Molecular.Function, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= PANTHER.GO.Slim.Molecular.Function, log10FDR= sleuth_significant_q005_down.txt..FDR.)
 
 panther.mfslim$term <- "MF"
 
-bars <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
-bars$log10FDR <- -log10(bars$log10FDR)
+bars.down <- rbind(panther.bpslim, panther.ccslim, panther.mfslim)
+bars.down$log10FDR <- -log10(bars.down$log10FDR)
 
-dim(bars)
-#there are too many GO terms to display on the plot; will filter on -log10(FDR)
-bars <- bars %>% filter(log10FDR > 4)
+dim(bars.down)
+#there are too many GO terms to display on the plot; will filter on -log10(FDR) 
+bars.down <- bars.down %>% filter(log10FDR > 2)
+bars.down$up_or_down <- "down" #only needed if we put the barplots together but at this moment not used
 
-p <-ggplot(bars, aes(x=GO, y=log10FDR, fill=term))
-p +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in downregulated gene set")
+
+p.down <-ggplot(bars.down, aes(x=GO, y=log10FDR, fill=term))
+p.down <- p.down +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("GO term") + ggtitle("Over-represented GO terms in downregulated gene set (filter: fdr < 10e-2)")
+
+#FIGURE fig_panther_up_down
+pdf(file="figures/fig_panther_up_down.pdf", width=15, height=13)
+cowplot::plot_grid(p.down, p.up, ncol=1, labels=LETTERS[1:2])
+dev.off()
+
+
+#REACTOME 
+#this is interesting to include as it has more informative and descriptive terms
+panther.reactome <- read.csv(file="results/panther/panther_reactome_sleugh_sig_txn_down_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.reactome)
+#filter
+panther.reactome <- panther.reactome[!((panther.reactome$bg_genes_all.txt...REFLIST..10765. > 200) | (panther.reactome$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.reactome)
+
+panther.reactome <- panther.reactome %>% filter(sleuth_significant_q005_down.txt..over.under. != "-") %>% dplyr::select(Reactome.pathways, sleuth_significant_q005_down.txt..FDR.) %>% dplyr::rename(GO= Reactome.pathways, log10FDR= sleuth_significant_q005_down.txt..FDR.)
+
+panther.reactome$term <- "reactome"
+
+bars.down <- panther.reactome
+bars.down$log10FDR <- -log10(bars.down$log10FDR)
+
+dim(bars.down)
+#there are too many GO terms to display on the plot; will filter on -log10(FDR) 
+bars.down <- bars.down %>% filter(log10FDR > 2)
+bars.down$up_or_down <- "down" #only needed if we put the barplots together but at this moment not used
+
+
+#FIGURE fig_panther_reactome
+p.down <-ggplot(bars.down, aes(x=GO, y=log10FDR, fill=term))
+p.down <- p.down +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("Reactome term") + ggtitle("Over-represented reactome terms in downregulated genes; fdr < 10e-2")
+p.down
+
+panther.reactome <- read.csv(file="results/panther/panther_reactome_sleugh_sig_txn_up_vs_all.txt", skip = 11, header=T, sep="\t")
+dim(panther.reactome)
+#filter
+panther.reactome <- panther.reactome[!((panther.reactome$bg_genes_all.txt...REFLIST..10765. > 200) | (panther.reactome$bg_genes_all.txt...REFLIST..10765. < 10)),]
+dim(panther.reactome)
+
+panther.reactome <- panther.reactome %>% filter(sleuth_significant_q005_up.txt..over.under. != "-") %>% dplyr::select(Reactome.pathways, sleuth_significant_q005_up.txt..FDR.) %>% dplyr::rename(GO= Reactome.pathways, log10FDR= sleuth_significant_q005_up.txt..FDR.)
+
+panther.reactome$term <- "reactome"
+
+bars.up <- panther.reactome
+bars.up$log10FDR <- -log10(bars.up$log10FDR)
+
+dim(bars.up)
+#if there are too many GO terms to display on the plot; will filter on -log10(FDR) 
+#bars.up <- bars.up %>% filter(log10FDR > 2)
+bars.up$up_or_down <- "up" #only needed if we put the barplots together but at this moment not used
+
+
+p.up <-ggplot(bars.up, aes(x=GO, y=log10FDR, fill=term))
+p.up <- p.up +geom_bar(stat = "identity") + coord_flip() + ylab("-log10(FDR)") + xlab("Reactome term") + ggtitle("Over-represented reactome terms in upregulated genes")
+p.up
+#results for upregulated genes do not add anything to what we found before
+```
+
+### Gene expression among genes in Wormbook pathways
+Here, we explore selected gene sets, as defined in the Wormbook, that correspond to well-established biological networks in C. elegans.
+Much of this code was written by Diego Chillon Pino.
+
+All genes analysed in this section were retrieved from [WormBook](http://www.wormbook.org/). For every pathway a data frame object is created. The user has to manually copy and paste the appropiate table from [WormBook](http://www.wormbook.org/) in a .txt file before running the code. Exceptions are pointed out. Note that the code slightly differ among pathways due to inconsistency of the tables' format.
+This script assumes the existence of a subdirectory within the working directory called `wormbook_pathways`, which contains the copied and pasted tables.
+
+```{r expression_within_wormbook_pathways}
+
+# Function to print results 
+print_hits <- function(x){
+  cat(
+    "Number of downregulated transcripts: ",
+    length(dplyr::filter(sleuth_table_txn, ext_gene %in% x &
+                           b < 0)[, c(2, 4, 7, 8)]$target_id),
+    " (",
+    length(dplyr::filter(sleuth_significant_txn, ext_gene %in% x &
+                           b < 0)[, c(2, 4, 7, 8)]$target_id),
+    " significant)\n",
+    sep = ""
+  )
+  
+  cat(
+    "Number of upregulated transcripts: ",
+    length(dplyr::filter(sleuth_table_txn, ext_gene %in% x &
+                           b > 0)[, c(2, 4, 7, 8)]$target_id),
+    " (",
+    length(dplyr::filter(sleuth_significant_txn, ext_gene %in% x &
+                           b > 0)[, c(2, 4, 7, 8)]$target_id),
+    " significant)",
+    sep = ""
+  )
+}
+
+
+### NEUROTRANSMITTERS
+#### Acetylcholine
+list.acetylcholine <- read.delim(
+  "./wormbook_pathways/acetylcholine.txt",
+  header = FALSE,
+  stringsAsFactors = FALSE,
+  na.strings = ""
+)
+
+# Remove leading and trailing spaces in all elements of the data frame
+list.acetylcholine[] <- lapply(list.acetylcholine, trimws)
+
+# Remove headers from the original table and overwrite 
+list.acetylcholine <- list.acetylcholine$V1[
+  which(grepl("[[:upper:]]+[[:punct:]][[:digit:]]*", list.acetylcholine$V1) == TRUE)
+  ] %>%
+  tolower()
+
+# add the genes mentioned in text but not appearing in the table (not a full list!)
+list.acetylcholine <- c(list.acetylcholine, c("cha-1", "unc-17", "cho-1", "snf-6", "ace-1", "ace-2", "ace-3", "ric-3", "lev-10", "eat-18", "cam-1"))
+# Print results (NOTE: only first transcript counts if many are in the gene)
+print_hits(list.acetylcholine)
 
 ```
 
